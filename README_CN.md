@@ -1004,6 +1004,7 @@ env = LocalEnvironment(
 - **Email**: <zc3930155@gmail.com> <wzq142857@gmail.com> <2910937975@qq.com>
 
 - **微信**: 
+![微信](docs/assets/mark.png)
 
 ---
 
