@@ -625,7 +625,7 @@ python src/cli.py --role ROLE --name NAME [OPTIONS]
 ### 项目根目录
 
 ```
-open_swarm_agent/
+nano_agent_team/
 ├── tui.py                   # TUI 主程序入口
 ├── main.py                  # CLI Watchdog 启动器
 ├── requirements.txt         # Python 依赖声明
@@ -859,7 +859,7 @@ with file_lock(".blackboard/global_indices/central_plan.md", "r+"):
 
 ### 1. 自定义 Watchdog 提示词
 
-编辑 [architect.md](file:///Users/bytedance/PycharmProjects/open_swarm_agent/src/prompts/architect.md) 定制 Swarm 的规划与约束策略。
+编辑 [architect.md]`src/prompts/architect.md` 定制 Swarm 的规划与约束策略。
 
 ### 2. 多模型混用
 

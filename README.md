@@ -316,7 +316,7 @@ Runtime and lifecycle management:
 
 ```bash
 git clone <your-repo-url>
-cd open_swarm_agent
+cd nano_agent_team
 ```
 
 2. **Create a virtual environment (recommended)**
@@ -614,7 +614,7 @@ python src/cli.py --role ROLE --name NAME [OPTIONS]
 ### Project Root
 
 ```
-open_swarm_agent/
+nano_agent_team/
 ├── tui.py                   # TUI main entry
 ├── main.py                  # CLI Watchdog launcher
 ├── requirements.txt         # Python dependencies
@@ -848,7 +848,7 @@ with file_lock(".blackboard/global_indices/central_plan.md", "r+"):
 
 ### 1. Custom Watchdog Prompt
 
-Edit [architect.md](file:///Users/bytedance/PycharmProjects/open_swarm_agent/src/prompts/architect.md) to customize Swarm planning and constraint policies.
+Edit [architect.md]`/src/prompts/architect.md` to customize Swarm planning and constraint policies.
 
 ### 2. Multi-Model Mix
 
