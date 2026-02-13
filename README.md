@@ -1026,8 +1026,9 @@ Thanks to the following projects:
 - **Email**: <zc3930155@gmail.com> <wzq142857@gmail.com> <2910937975@qq.com>
 
 - **WeiXin**:
-
-<img src="docs/assets/mark.png" alt="weixin" width="100" />
+<div align="center">
+  <img src="docs/assets/mark.png" alt="weixin" width="100" />
+</div>
 
 ---
 

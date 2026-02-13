@@ -1037,8 +1037,9 @@ env = LocalEnvironment(
 - **Email**: <zc3930155@gmail.com> <wzq142857@gmail.com> <2910937975@qq.com>
 
 - **微信**: 
-
-<img src="docs/assets/mark.png" alt="微信" width="100" />
+<div align="center">
+  <img src="docs/assets/mark.png" alt="微信" width="170" />
+</div>
 
 ---
 
