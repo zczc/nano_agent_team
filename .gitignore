@@ -2,4 +2,4 @@
 *.pyc
 logs/
 .blackboard/
-.venv/
+.venv/venv/

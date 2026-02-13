@@ -92,10 +92,12 @@ The biggest challenge in multi-agent systems is how to maintain a unified **Shar
 #### Key Mechanisms
 
 **✅ Intent Alignment**
+
 - Explicitly externalize abstract collaboration intents through structured Index Files and YAML metadata.
 - Enables agents to automatically understand collaboration protocols without hard-coded APIs.
 
 **🔒 State Consensus**
+
 - Uses lightweight optimistic locking to achieve distributed strong consistency of state without introducing centralized scheduling bottlenecks.
 - Supports multi-agent concurrent read/write with automatic conflict resolution.
 
@@ -222,12 +224,14 @@ A unified interface supports multiple LLM providers:
 The core agent class that encapsulates LLM calls, tool execution, and middleware management.
 
 **Main responsibilities**:
+
 - Manage conversation history and context
 - Dispatch tool execution
 - Apply middleware policies (budgeting, request monitoring)
 - Generate system prompts
 
 **Related files**:
+
 - `src/core/agent_wrapper.py`
 - `src/core/middlewares.py`
 - `src/core/runtime.py`
@@ -247,6 +251,7 @@ The blackboard tool provides standardized read/write interfaces (Swarm mode):
 - `create_index(filename, content)` to create index files
 
 **Related files**:
+
 - `src/tools/blackboard_tool.py`
 - `src/core/protocol.py`
 - `src/utils/file_lock.py`
@@ -262,6 +267,7 @@ Execute the core ReAct loop and tool calls:
 - Middleware chain (budgeting, loop detection, error recovery)
 
 **Related files**:
+
 - `backend/llm/engine.py`
 - `backend/llm/tool_registry.py`
 - `backend/llm/skill_registry.py`
@@ -276,6 +282,7 @@ Dynamically build system prompts and parse blackboard protocols:
 - Parse YAML Frontmatter metadata and usage policies
 
 **Related files**:
+
 - `src/core/prompt_builder.py`
 - `src/core/protocol.py`
 - `src/core/schema.py`
@@ -288,6 +295,7 @@ Runtime and lifecycle management:
 - Event logs and global notification broadcast
 
 **Related files**:
+
 - `src/core/runtime.py`
 - `src/core/middlewares.py`
 - `src/tools/status_tool.py`
@@ -337,11 +345,13 @@ playwright install
 ```
 
 **Notes**:
+
 - If browsers are not installed, the system will skip loading `browser_use`, without affecting other features
 - Browsers are installed in the Playwright cache directory
 - browser_use requires the LLM provider to support `response_format` = `json_object`; see the [browser_use docs](https://github.com/browser-use/browser-use)
 
 **Verify installation**:
+
 ```bash
 # Check Playwright version
 playwright --version
@@ -369,11 +379,13 @@ python tui.py
 ```
 
 After launching:
+
 1. Press `Ctrl+P` to open the provider panel
 2. Choose your LLM provider (e.g., qwen)
 3. Enter your API Key
 4. Press `Esc` to return, then `Ctrl+O` to select a model
 5. Enter a task description and press `Enter` to start; switch between `Chat` / `Swarm`
+
 - `chat` mode: single-agent conversation
 - `swarm` mode: multi-agent collaboration
 
@@ -419,6 +431,7 @@ python main.py "Hello, introduce yourself"
 ### Interface Overview
 
 The Nano Agent Team TUI has two main screens:
+
 ```
 ┌────────────────────────────────────────────────────────┐
 │   Session Screen        →       Monitor Screen         │
@@ -430,7 +443,6 @@ The Nano Agent Team TUI has two main screens:
 TUI screenshot
 ![TUI screenshot](docs/assets/tui-screenshot.jpg)
 
-
 TUI demo video
 
 https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
@@ -440,27 +452,28 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 **Purpose**: start tasks, interact, switch Chat/Swarm modes
 
 **UI elements**:
+
 - Input box: enter task descriptions or commands
 - Mode toggle: `Chat` / `Swarm`
 - Model indicator: current selected model
 
 **Shortcuts**:
 
-| Shortcut | Action | Description |
-|----------|--------|-------------|
-| `Enter` | Start session | Send task description and enter Session |
-| `Tab` | Toggle mode | Switch between Chat and Swarm |
-| `Ctrl+P` | Provider config | Open provider connection panel |
-| `Ctrl+O` | Select model | Open model selection dialog |
-| `Ctrl+S` | Switch model | Quick switch between recent models |
-| `Ctrl+C` | Exit | Close the application |
-
+| Shortcut | Action          | Description                             |
+| -------- | --------------- | --------------------------------------- |
+| `Enter`  | Start session   | Send task description and enter Session |
+| `Tab`    | Toggle mode     | Switch between Chat and Swarm           |
+| `Ctrl+P` | Provider config | Open provider connection panel          |
+| `Ctrl+O` | Select model    | Open model selection dialog             |
+| `Ctrl+S` | Switch model    | Quick switch between recent models      |
+| `Ctrl+C` | Exit            | Close the application                   |
 
 ### 2. Monitor Screen
 
 **Purpose**: monitor multi-agent execution in Swarm mode
 
 **Layout**:
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  Monitor - Swarm Execution                                   │
@@ -477,25 +490,28 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 
 **Shortcuts**:
 
-| Shortcut | Action | Description |
-|----------|--------|-------------|
-| `↑` `↓` | Select agent | Switch in the left list |
-| `Enter` | Send intervention | Send instructions to selected agent |
-| `Esc` | Back to session | Exit monitor to Session |
-| `Ctrl+C` | Exit | Close the application |
+| Shortcut | Action            | Description                         |
+| -------- | ----------------- | ----------------------------------- |
+| `↑` `↓`  | Select agent      | Switch in the left list             |
+| `Enter`  | Send intervention | Send instructions to selected agent |
+| `Esc`    | Back to session   | Exit monitor to Session             |
+| `Ctrl+C` | Exit              | Close the application               |
 
 **Real-time status**:
+
 - **Thinking**: shows "🤔 Thinking..."
 - **Tool call**: shows "🔧 Calling tool: tool_name"
 - **Waiting**: shows progress animation
 
 **Modes**:
+
 - **Chat mode**: single-agent chat, good for simple queries
 - **Swarm mode**: launches Watchdog to coordinate multi-agent tasks
 
 ### 3. Provider Configuration (Ctrl+P)
 
 **Example UI**:
+
 ```
 ┌──────────────────────────────────────┐
 │  Connect to Providers                │
@@ -509,6 +525,7 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 ```
 
 **Steps**:
+
 1. Use `↑` `↓` to select a provider
 2. Press `Enter` to open the API key input dialog
 3. Paste your API key and confirm
@@ -516,6 +533,7 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 5. Press `Esc` to close the panel
 
 **Supported providers** (default config):
+
 - Step, Qwen, DeepSeek, Moonshot, MiniMax
 - OpenAI, OpenRouter
 
@@ -524,6 +542,7 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 ### 4. Model Selection (Ctrl+O)
 
 **Example UI**:
+
 ```
 ┌──────────────────────────────────────┐
 │  Select Model                        │
@@ -536,6 +555,7 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 ```
 
 **Usage notes**:
+
 - Only models from connected providers are shown
 - Use `↑` `↓` to navigate, `Enter` to select
 - The current model is marked with `●`
@@ -554,14 +574,14 @@ python main.py [OPTIONS] [QUERY]
 
 **Parameters**:
 
-| Parameter | Type | Default | Description |
-|----------|------|---------|-------------|
-| `QUERY` | string | - | task description (optional, interactive if omitted) |
-| `--role` | string | `Architect` | role of the primary agent |
-| `--name` | string | `Watchdog` | name of the primary agent |
-| `--keep-history` | flag | False | keep previous blackboard data |
-| `--model` | string | from config | specify model (e.g., `openai/gpt-5-mini`) |
-| `--keys` | string | `keys.json` | API keys config file path |
+| Parameter        | Type   | Default     | Description                                         |
+| ---------------- | ------ | ----------- | --------------------------------------------------- |
+| `QUERY`          | string | -           | task description (optional, interactive if omitted) |
+| `--role`         | string | `Architect` | role of the primary agent                           |
+| `--name`         | string | `Watchdog`  | name of the primary agent                           |
+| `--keep-history` | flag   | False       | keep previous blackboard data                       |
+| `--model`        | string | from config | specify model (e.g., `openai/gpt-5-mini`)           |
+| `--keys`         | string | `keys.json` | API keys config file path                           |
 
 **Examples**:
 
@@ -775,13 +795,16 @@ backend/
 The blackboard is a shared state and artifact store for multi-agent collaboration, created at runtime under `.blackboard/`.
 
 ### Directory Overview (runtime)
+
 - `global_indices/`: index files (with YAML Frontmatter)
 - `resources/`: large files and artifacts (code, reports, data, etc.)
 - `mailboxes/`: agent mailboxes (JSON lists)
 - `logs/`: runtime logs
 
 ### blackboard_tool (Swarm mode)
+
 Currently supported operations:
+
 - `list_indices`
 - `read_index` (`filename`)
 - `append_to_index` (`filename`, `content`)
@@ -792,6 +815,7 @@ Currently supported operations:
 - `list_resources`
 
 Example:
+
 ```python
 agent.call_tool("blackboard_tool", {
     "operation": "read_index",
@@ -806,7 +830,9 @@ agent.call_tool("blackboard_tool", {
 ```
 
 ### Concurrency Control
+
 Use file locks for atomic read/write:
+
 ```python
 from src.utils.file_lock import file_lock
 
@@ -821,9 +847,11 @@ with file_lock(".blackboard/global_indices/central_plan.md", "r+"):
 ## 🚀 Advanced Usage
 
 ### 1. Custom Watchdog Prompt
+
 Edit [architect.md](file:///Users/bytedance/PycharmProjects/open_swarm_agent/src/prompts/architect.md) to customize Swarm planning and constraint policies.
 
 ### 2. Multi-Model Mix
+
 ```bash
 python main.py --model "qwen/qwen3" "Build a blog system"
 ```
@@ -838,9 +866,11 @@ agent.call_tool("spawn_swarm_agent", {
 ```
 
 ### 3. Sub-agents and Skills
+
 - Sub-agents: `.subagents/*.md` are registered as tools with the same name (e.g., `file_organizer`)
 - Skills: `activate_skill` returns SOPs and constraints, follow the instructions
-```
+
+````
 
 ---
 
@@ -852,13 +882,14 @@ agent.call_tool("spawn_swarm_agent", {
 
 ```bash
 python main.py --model "qwen/qwen3" "Task description"
-```
+````
 
 ### Q2: What if an agent is unresponsive?
 
 **A**: Possible causes and fixes:
 
 1. **Token limit**: increase the `max_iterations` parameter
+
    ```bash
    python src/cli.py --max-iterations 100 ...
    ```
@@ -901,11 +932,13 @@ env = LocalEnvironment(
 ### Q6: Can I use this in production?
 
 **A**: It is currently in development and recommended for:
+
 - ✅ Prototyping
 - ✅ Research and experiments
 - ✅ Automation scripts
 
 Not recommended for:
+
 - ❌ Critical business systems
 - ❌ Sensitive data
 - ❌ Unattended production environments
@@ -934,11 +967,13 @@ Not recommended for:
 **A**: If you see errors like "Failed to establish CDP connection":
 
 1. **Check Playwright installation**:
+
    ```bash
    playwright --version
    ```
 
 2. **Install browsers**:
+
    ```bash
    playwright install chromium
    ```
@@ -948,11 +983,12 @@ Not recommended for:
    python3 -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()"
    ```
 4. **Check LLM provider**:
-     The LLM provider must support `response_format` as `json_object`. See the [browser_use docs](https://github.com/browser-use/browser-use)
+   The LLM provider must support `response_format` as `json_object`. See the [browser_use docs](https://github.com/browser-use/browser-use)
 
 5. **Note**:
    - The system automatically detects browser installation and skips `browser_use` if not installed
    - This does not affect other tools
+
 - Logs show a warning: `[ToolRegistry] Playwright browser not installed. Run 'playwright install chromium' to enable browser_use tool.`
 
 ---
