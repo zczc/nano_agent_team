@@ -441,7 +441,7 @@ Nano Agent Team TUI 主要包含两个界面：
 ```
 
 TUI 界面截图
-![TUI 界面截图](docs/assets/tui-screenshot.png)
+![TUI 界面截图](docs/assets/tui-screenshot.jpg)
 
 
 TUI 操作演示视频

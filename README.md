@@ -428,7 +428,7 @@ The Nano Agent Team TUI has two main screens:
 ```
 
 TUI screenshot
-![TUI screenshot](docs/assets/tui-screenshot.png)
+![TUI screenshot](docs/assets/tui-screenshot.jpg)
 
 
 TUI demo video
