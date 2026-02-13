@@ -1,0 +1,3 @@
+# arXiv search skill dependencies
+# The script uses the `arxiv` Python package.
+arxiv
