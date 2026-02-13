@@ -1,0 +1,497 @@
+import os
+import json
+import yaml
+import fcntl
+import signal
+import hashlib
+import time
+import threading
+import uuid
+from typing import Dict, Any, List, Optional, Tuple
+from contextlib import contextmanager
+from backend.tools.base import BaseTool
+from src.utils.file_lock import file_lock, LockTimeoutError
+
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+class BlackboardTool(BaseTool):
+    """
+    Enhanced Blackboard Tool with Semantic Index Directory Support.
+    
+    Structure:
+    - .blackboard/global_indices/: Index files (Markdown + YAML Frontmatter)
+    - .blackboard/resources/: Raw content files
+    - .blackboard/registry.json: Agent registry
+    """
+    
+    def __init__(self, blackboard_dir: str = ".blackboard", lock_timeout: int = 30):
+        super().__init__()
+        self.blackboard_dir = blackboard_dir
+        self.lock_timeout = lock_timeout
+        self.indices_dir = os.path.join(blackboard_dir, "global_indices")
+        self.resources_dir = os.path.join(blackboard_dir, "resources")
+        
+        os.makedirs(blackboard_dir, exist_ok=True)
+        os.makedirs(self.indices_dir, exist_ok=True)
+        os.makedirs(self.resources_dir, exist_ok=True)
+    
+    @property
+    def name(self) -> str:
+        return "blackboard"
+    
+    @property
+    def description(self) -> str:
+        return """The Primary Collaboration Interface for the Swarm.
+        
+    **Directory Semantics**:
+    - `global_indices/`: **Communication Layer**. Shared state, plans, and coordination signals. (Metadata)
+    - `resources/`: **Storage Layer**. Heavy artifacts, code files, data dumps, and reports. (Data)
+    - **Protocol**: "Indices point to Resources". Do not put large content in indices.
+
+Operations:
+1. `list_indices()`: Discover available index files. Use this first to see what exists.
+2. `read_index(filename)`: Read an index (e.g. 'central_plan.md'). Returns content AND `checksum` (needed for updates).
+3. `update_task(filename, task_id, updates, expected_checksum)`: The STANDARD way to update a task's status or result in a specific index (default: central_plan.md). Safe & atomic.
+   - Example: `update_task(filename="central_plan.md", task_id=1, updates={"status": "DONE", "result_summary": "..."}, expected_checksum="...")`
+4. `append_to_index(filename, content)`: Append a log entry to a timeline file. Thread-safe.
+5. `create_resource(filename, content, overwrite=False)`: Save large content (code, reports) to resources.
+   - Resource files are append-only by default (no overwrite).
+6. `update_index(filename, content, expected_checksum)`: Full-file update (CAS protected). Use ONLY for structural changes (adding tasks, reordering).
+7. `create_index(filename, content)`: Create a new global communication channel (index file).
+   - **MANDATORY**: `content` MUST start with a YAML frontmatter containing:
+     - `name`: "The title of the index file."
+     - `description`: "A description of the file's purpose."
+     - `usage_policy`: "Usage protocol (how to interact, format, etc.)."
+   - **SECURITY TIP**: Always wrap YAML values in double quotes `""` to avoid parsing errors with special characters like `:`, `[`, `]`.
+   - **Example**:
+     ```
+     ---
+     name: "My_Channel"
+     description: "Discussing the progress of task X."
+     usage_policy: "Architect creates tasks; executors update status."
+     ---
+     # Body starts here...
+     ```
+8. `read_resource(filename)`: Read a raw file from resources.
+9. `list_resources()`: List all files in the `resources/` directory. Useful for discovering artifacts.
+10. `list_templates()`: List all available `.md` templates in the templates directory.
+11. `read_template(filename)`: Read the content of a specific template file by filename.
+"""
+    
+    @property
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["list_indices", "read_index", "update_index", "append_to_index", "update_task", "create_resource", "read_resource", "list_resources", "list_templates", "read_template"],
+                    "description": "Operation name"
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Target filename for index, resource, or template operations."
+                },
+                "task_id": {
+                    "type": "integer",
+                    "description": "ID of the task to update (for update_task)"
+                },
+                "updates": {
+                    "type": "object",
+                    "description": "Dictionary of fields to update (for update_task)"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write or append"
+                },
+                "expected_checksum": {
+                    "type": "string",
+                    "description": "Expected SHA256 checksum for CAS updates (mandatory for update_index/update_task)"
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Whether to overwrite existing resource (default False)"
+                }
+            },
+            "required": ["operation"]
+        }
+
+    # Internal _file_lock removed, using src.utils.file_lock instead
+
+    def _parse_frontmatter(self, content: str) -> Tuple[Dict, str]:
+        """Simple and robust frontmatter parser"""
+        if content.startswith("---"):
+            # Handle both \r\n and \n
+            # We look for the second --- marker
+            try:
+                # Find the end of the first marker line
+                first_newline = content.find("\n")
+                if first_newline == -1: return {}, content
+                
+                # Find the start of the closing marker
+                # We search for \n---\n or \n--- (at end of file or followed by newline)
+                end_marker_pos = content.find("\n---", first_newline)
+                if end_marker_pos == -1: return {}, content
+                
+                fm_section = content[first_newline+1:end_marker_pos].strip()
+                body_start = content.find("\n", end_marker_pos + 1)
+                if body_start == -1:
+                    body = "" # No body after closing marker
+                else:
+                    body = content[body_start+1:]
+                
+                try:
+                    meta = yaml.safe_load(fm_section)
+                    return meta if isinstance(meta, dict) else {}, body
+                except yaml.YAMLError as e:
+                    from backend.utils.logger import Logger
+                    Logger.error(f"[BlackboardTool] YAML Parse Error in frontmatter: {e}")
+                    return {}, content
+            except Exception:
+                return {}, content
+        return {}, content
+
+    def _sanitize_index_name(self, name: str) -> str:
+        """Strip 'global_indices/' prefix if agent included it by mistake"""
+        if name.startswith("global_indices/"):
+            return name.replace("global_indices/", "", 1)
+        elif name.startswith("/global_indices/"):
+            return name.replace("/global_indices/", "", 1)
+        return name
+
+    def _list_indices(self) -> str:
+        indices = []
+        if not os.path.exists(self.indices_dir):
+            return "No indices found."
+
+        for fname in os.listdir(self.indices_dir):
+            if fname.endswith(".md"):
+                fpath = os.path.join(self.indices_dir, fname)
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        # Read enough to cover frontmatter. 8KB should be plenty for metadata.
+                        content = f.read(8192) 
+                        meta, _ = self._parse_frontmatter(content)
+                        # Default values
+                        item = {}
+                        # Update with all meta fields
+                        if isinstance(meta, dict):
+                            item.update(meta)
+                        # Ensure filename is present and correct
+                        item["filename"] = fname
+                        indices.append(item)
+                except Exception as e:
+                    indices.append({"filename": fname, "error": str(e)})
+        
+        return json.dumps(indices, indent=2, ensure_ascii=False)
+
+    def _read_index(self, filename: str) -> str:
+        filename = self._sanitize_index_name(filename)
+        fpath = os.path.join(self.indices_dir, filename)
+        if not os.path.exists(fpath):
+            return f"Error: Index '{filename}' not found."
+            
+        with file_lock(fpath, 'r', fcntl.LOCK_SH, timeout=self.lock_timeout) as fd:
+            if fd is None: return f"Error: Could not open {filename}"
+            content = fd.read()
+            
+        meta, body = self._parse_frontmatter(content)
+        
+        return json.dumps({
+            "metadata": meta,
+            "content": body,
+            "checksum": hashlib.sha256(content.encode('utf-8')).hexdigest()
+        }, indent=2, ensure_ascii=False)
+
+    def _append_to_index(self, filename: str, content: str) -> str:
+        filename = self._sanitize_index_name(filename)
+        fpath = os.path.join(self.indices_dir, filename)
+        
+        # Ensure newline at start if needed
+        if not content.startswith("\n"):
+            content = "\n" + content
+            
+        with file_lock(fpath, 'a', fcntl.LOCK_EX, timeout=self.lock_timeout) as fd:
+            fd.write(content)
+            
+        return "Success: Appended to index."
+
+    def _update_index(self, filename: str, content: str, expected_checksum: str) -> str:
+        """
+        Update index content with CAS property.
+        """
+        filename = self._sanitize_index_name(filename)
+        fpath = os.path.join(self.indices_dir, filename)
+        
+        if not os.path.exists(fpath):
+            return f"Error: Index '{filename}' not found."
+            
+        if not expected_checksum:
+            return "Error: expected_checksum is required for update_index."
+
+        with file_lock(fpath, 'r+', fcntl.LOCK_EX, timeout=self.lock_timeout) as fd:
+            if fd is None: return f"Error: Could not open {filename}"
+            
+            # Read current content
+            current_content = fd.read()
+            current_checksum = hashlib.sha256(current_content.encode('utf-8')).hexdigest()
+            
+            # CAS Check
+            if current_checksum != expected_checksum:
+                return f"Error: CAS Failed. Content has changed. Current checksum: {current_checksum}"
+            
+            # Verify YAML frontmatter integrity in new content
+            if not content.startswith("---"):
+                return "Error: Metadata Missing. content MUST start with '---' followed by YAML frontmatter."
+            
+            try:
+                # Validate the new content has a parseable frontmatter
+                test_meta, _ = self._parse_frontmatter(content)
+                if not test_meta:
+                    return "Error: Failed to parse YAML frontmatter in the provided content."
+            except Exception as e:
+                return f"Error: YAML validation failed: {str(e)}"
+
+            # Update
+            fd.seek(0)
+            fd.write(content)
+            fd.truncate()
+            
+        return "Success: Index updated."
+
+    def _update_task(self, filename: str, task_id: int, updates: Dict[str, Any], expected_checksum: str) -> str:
+        """
+        Partial update of a task in the specified index file (default: central_plan.md) with CAS.
+        """
+        fpath = os.path.join(self.indices_dir, filename)
+        
+        if not os.path.exists(fpath):
+            return f"Error: Index '{filename}' not found."
+            
+        if not expected_checksum:
+            return "Error: expected_checksum is required for update_task."
+
+        with file_lock(fpath, 'r+', fcntl.LOCK_EX, timeout=self.lock_timeout) as fd:
+            if fd is None: return f"Error: Could not open {filename}"
+            
+            # 1. Read & Verify CAS
+            content = fd.read()
+            current_checksum = hashlib.sha256(content.encode('utf-8')).hexdigest()
+            
+            if current_checksum != expected_checksum:
+                return f"Error: CAS Failed. Plan has changed. Current checksum: {current_checksum}"
+            
+            # 2. Parse JSON
+            meta, body = self._parse_frontmatter(content)
+            try:
+                # Find JSON block
+                json_start = body.find("```json")
+                if json_start == -1: return "Error: No JSON block found in plan."
+                json_end = body.rfind("```")
+                if json_end == -1 or json_end <= json_start: return "Error: Malformed JSON block."
+                
+                json_str = body[json_start+7:json_end].strip()
+                plan = json.loads(json_str)
+                
+                # 3. Find & Update Task
+                tasks = plan.get("tasks", [])
+                target_task = next((t for t in tasks if t.get("id") == task_id), None)
+                
+                if not target_task:
+                    return f"Error: Task ID {task_id} not found."
+                
+                # Apply updates
+                for k, v in updates.items():
+                    # Security/Validation could go here (e.g. check allowed fields)
+                    target_task[k] = v
+                
+                # 4. Write back
+                new_json_str = json.dumps(plan, indent=2, ensure_ascii=False)
+                new_body = body[:json_start+7] + "\n" + new_json_str + "\n" + body[json_end:]
+                
+                # Reconstruct full file
+                if meta:
+                    # width=1000 to prevent unwanted wrapping in long fields (e.g. usage_policy)
+                    # sort_keys=False to preserve order
+                    new_content = "---\n" + yaml.dump(meta, sort_keys=False, width=1000) + "---\n" + new_body
+                else:
+                    new_content = new_body
+                
+                # Double check the reconstructed content is valid before writing
+                try:
+                    verify_meta, _ = self._parse_frontmatter(new_content)
+                    if not verify_meta and meta:
+                        return "Error: Reconstructed content has invalid YAML frontmatter."
+                except Exception as ve:
+                    return f"Error: YAML Verification failed before write: {ve}"
+
+                fd.seek(0)
+                fd.write(new_content)
+                fd.truncate()
+                
+                return "Success: Task updated."
+                
+            except json.JSONDecodeError:
+                return "Error: Failed to parse Central Plan JSON."
+            except Exception as e:
+                return f"Error updating task: {e}"
+
+    def _create_index(self, filename: str, content: str) -> str:
+        filename = self._sanitize_index_name(filename)
+        fpath = os.path.join(self.indices_dir, filename)
+        
+        if os.path.exists(fpath):
+            return f"Index '{filename}' already exists."
+
+        # 1. Parse Frontmatter and Validate Requirements
+        meta, _ = self._parse_frontmatter(content)
+        if not content.startswith("---"):
+             return "Error: Metadata Missing. content MUST start with '---' followed by YAML frontmatter."
+        
+        required_fields = ["name", "description", "usage_policy"]
+        missing = [f for f in required_fields if f not in meta]
+        if missing:
+            return f"Error: YAML Metadata incomplete. Missing fields: {', '.join(missing)}. Please refer to BlackboardTool description for format."
+        
+        # 2. Proceed with creation
+        os.makedirs(os.path.dirname(fpath), exist_ok=True)
+
+        with open(fpath, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        return f"Success: Created index '{filename}'"
+
+    def _create_resource(self, filename: str, content: str, overwrite: bool) -> str:
+        # Prevent traversal
+        if ".." in filename or filename.startswith("/"):
+            return "Error: Invalid filename."
+            
+        # Robustness: Strip dir if the agent mistakenly included it
+        filename = filename.split('/')[-1]
+
+        fpath = os.path.join(self.resources_dir, filename)
+        
+        if os.path.exists(fpath) and not overwrite:
+            return f"Error: File '{filename}' already exists. Set overwrite=True to replace."
+            
+        os.makedirs(os.path.dirname(fpath), exist_ok=True)
+        with open(fpath, 'w', encoding='utf-8') as f:
+            f.write(content)
+            
+        return f"Success: Resource '{filename}' created at {fpath}"
+
+    def _list_resources(self) -> str:
+        """List all files in the resources directory."""
+        if not os.path.exists(self.resources_dir):
+            return "No resources directory found."
+        
+        resources = []
+        for root, _, files in os.walk(self.resources_dir):
+            for f in files:
+                rel_path = os.path.relpath(os.path.join(root, f), self.resources_dir)
+                resources.append(rel_path)
+        
+        return json.dumps(resources, indent=2, ensure_ascii=False)
+
+    def _list_templates(self) -> str:
+        """List all available templates."""
+        # Use project root to find templates
+        templates_dir = os.path.join(project_root, "blackboard_templates")
+        if not os.path.exists(templates_dir):
+            return "No templates directory found."
+        templates = [f for f in os.listdir(templates_dir) if f.endswith(".md")]
+        return json.dumps(templates, indent=2, ensure_ascii=False)
+
+    def _read_template(self, filename: str) -> str:
+        """Read a template by name."""
+        if not filename:
+            return "Error: Template filename is required."
+        # Use project root to find templates
+        templates_dir = os.path.join(project_root, "blackboard_templates")
+        fpath = os.path.abspath(os.path.join(templates_dir, filename))
+        
+        # Verify it is still inside templates_dir
+        if not fpath.startswith(templates_dir):
+            return "Error: Access denied (Invalid template path)."
+        
+        if not os.path.exists(fpath):
+            return f"Error: Template '{filename}' not found."
+            
+        with open(fpath, 'r', encoding='utf-8') as f:
+            return f.read()
+
+    def _read_resource(self, filename: str) -> str:
+        # Security: robust filename handling
+        safe_name = filename.split('/')[-1]
+        abs_path = os.path.abspath(os.path.join(self.resources_dir, safe_name))
+        if not abs_path.startswith(os.path.abspath(self.resources_dir)):
+            return "Error: Access denied (Outside resources)."
+        if os.path.exists(abs_path):
+            with open(abs_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        return f"Error: Resource '{filename}' not found."
+
+    def execute(self, operation: str, **kwargs) -> str:
+        operation = operation.lower()
+        if not operation:
+            return "Error: Operation is required."
+        
+        filename = kwargs.get("filename")
+        
+        try:
+            if operation == "list_indices" or "list_indices" in operation:
+                return self._list_indices()
+            
+            elif operation == "read_index" or "read_index" in operation:
+                if not filename: return "Error: filename is required for read_index."
+                return self._read_index(filename)
+            
+            elif operation == "append_to_index" or "append_to_index" in operation:
+                if not filename: return "Error: filename is required for append_to_index."
+                return self._append_to_index(filename, kwargs.get("content"))
+            
+            elif operation == "update_index" or "update_index" in operation:
+                if not filename: return "Error: filename is required for update_index."
+                return self._update_index(filename, kwargs.get("content"), kwargs.get("expected_checksum"))
+            
+            elif operation == "update_task" or "update_task" in operation:
+                # Default to central_plan.md if filename not provided
+                fname = filename or "central_plan.md"
+                return self._update_task(
+                    fname,
+                    kwargs.get("task_id"),
+                    kwargs.get("updates"),
+                    kwargs.get("expected_checksum"),
+                )
+            
+            elif operation == "create_index" or "create_index" in operation:
+                if not filename: return "Error: filename is required for create_index."
+                return self._create_index(filename, kwargs.get("content"))
+            
+            elif operation == "create_resource" or "create_resource" in operation:
+                if not filename: return "Error: filename is required for create_resource."
+                return self._create_resource(
+                    filename, 
+                    kwargs.get("content"), 
+                    kwargs.get("overwrite", False)
+                )
+            
+            elif operation == "read_resource" or "read_resource" in operation:
+                if not filename: return "Error: filename is required for read_resource."
+                return self._read_resource(filename)
+            
+            elif operation == "list_templates" or "list_templates" in operation:
+                return self._list_templates()
+            
+            elif operation == "read_template" or "read_template" in operation:
+                if not filename: return "Error: filename is required for read_template."
+                return self._read_template(filename)
+            
+            elif operation == "list_resources" or "list_resources" in operation:
+                return self._list_resources()
+
+            else:
+                return f"Error: Unknown operation {operation}"
+        except Exception as e:
+            return f"Error: {str(e)}"
