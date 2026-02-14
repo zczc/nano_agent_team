@@ -520,24 +520,20 @@ class AgentMonitorScreen(Screen):
         max_retries = 5
         retry_count = 0
 
-        while retry_count < max_retries and self.is_monitoring:
+        while self.is_monitoring:
             try:
-                # Wait for file with retry
-                retries = 30
-                while self.is_monitoring and retries > 0 and not os.path.exists(log_path):
-                    time.sleep(1.0)
-                    retries -= 1
-
-                if not self.is_monitoring:
-                    break
-
+                # Wait for file with retry (Infinite loop until monitoring stops)
                 if not os.path.exists(log_path):
-                    Logger.warning(f"[Monitor] Log file NOT found for {agent_name} (attempt {retry_count + 1}/{max_retries}): {log_path}")
+                     # Only log periodically to avoid spamming
+                    if retry_count % 10 == 0:
+                        Logger.warning(f"[Monitor] Log file NOT found for {agent_name} (waiting...): {log_path}")
+                    
                     retry_count += 1
-                    time.sleep(2)  # Wait before retry
+                    time.sleep(3.0)  # User requested 3s retry interval
                     continue
 
                 Logger.info(f"[Monitor] Tailer starting for {agent_name}: {log_path}")
+                retry_count = 0  # Reset counter on success
 
                 with open(log_path, 'r', encoding='utf-8') as f:
                     # 1. Read all existing history at once
@@ -564,26 +560,20 @@ class AgentMonitorScreen(Screen):
                             last_flush = now
 
                         if not new_lines:
-                            # File might have been rotated, check if it still exists
+                            # File might have been rotated or deleted
                             if not os.path.exists(log_path):
-                                Logger.warning(f"[Monitor] Log file disappeared for {agent_name}, attempting to reconnect...")
+                                Logger.warning(f"[Monitor] Log file disappeared for {agent_name}, entering retry loop...")
                                 break
                             time.sleep(1.0)  # Poll every 1s for new content
 
-                # If we exited the inner loop, try to reconnect
+                # If connection lost (break from inner loop), wait a bit before retrying
                 if self.is_monitoring:
-                    Logger.info(f"[Monitor] Reconnecting tailer for {agent_name}...")
-                    retry_count += 1
-                    time.sleep(1)
+                    time.sleep(3.0)
 
             except Exception as e:
-                Logger.error(f"[Monitor] Log tailer error for {agent_name} (attempt {retry_count + 1}/{max_retries}): {e}")
-                retry_count += 1
+                Logger.error(f"[Monitor] Log tailer error for {agent_name}: {e}")
                 if self.is_monitoring:
-                    time.sleep(2)  # Wait before retry
-
-        if retry_count >= max_retries:
-            Logger.error(f"[Monitor] Giving up on tailing {agent_name} after {max_retries} retries")
+                    time.sleep(3.0)  # Wait before retry
 
     def process_log_batch(self, agent_name: str, lines: List[str]):
         Logger.info(f"[Monitor] Processing batch for {agent_name}: {len(lines)} lines")

@@ -19,9 +19,10 @@ class EditFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Replace a unique string segment in a file with new content. "
-            "This tool is safer than write_file for small edits (for text files) as it ensures the target segment is unique. "
-            "Supports text files (.txt, .md, .yaml, .yml) and data files (.json, .csv, .tsv)."
+            "Replace a UNIQUE string segment in an existing file with new content. "
+            "Use for: modifying configs, fixing bugs, updating functions, partial edits. "
+            "Supports: .txt, .md, .yaml, .yml, .json, .csv, .tsv. "
+            "Do NOT use for creating new files or complete rewrites."
         )
     
     @property
