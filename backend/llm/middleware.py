@@ -185,7 +185,7 @@ class ExecutionBudgetManager(StrategyMiddleware):
         - Service Quality: Ensure system stability
     """
     
-    def __init__(self, max_iterations: int = 50):
+    def __init__(self, max_iterations: int):
         """
         Initialize Execution Budget Manager
         

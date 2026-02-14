@@ -405,13 +405,25 @@ Be concise and helpful. Format your responses using markdown when appropriate.""
         if not self.agent:
             self.notify("Agent not initialized", severity="error")
             return
-        
+
         chat_area = self.query_one("#chat-area", ScrollableContainer)
-        
-        # Stream messages from agent
-        for chat_msg in self.agent.send_message(message):
-            # Use call_from_thread to update UI from worker thread
-            self.app.call_from_thread(self._add_or_update_message, chat_msg)
+        generator = None
+
+        try:
+            # Stream messages from agent
+            generator = self.agent.send_message(message)
+            for chat_msg in generator:
+                # Use call_from_thread to update UI from worker thread
+                self.app.call_from_thread(self._add_or_update_message, chat_msg)
+        except Exception as e:
+            self.app.call_from_thread(self.notify, f"Agent error: {e}", severity="error")
+        finally:
+            # Ensure generator is closed to trigger finally block in _send_message_swarm
+            if generator:
+                try:
+                    generator.close()
+                except Exception:
+                    pass
     
     def _add_or_update_message(self, chat_msg: ChatMessage):
         """Add or update a message in the chat area"""

@@ -41,7 +41,7 @@ class AgentConfig:
     """Configuration for the agent"""
     mode: AgentMode = AgentMode.CHAT
     model_key: Optional[str] = None
-    max_iterations: int = 50
+    max_iterations: int = 200
     system_prompt: str = "You are a helpful AI assistant."
     # Swarm-specific config
     swarm_role: str = "assistant"
@@ -524,7 +524,7 @@ class AgentBridge:
             # Lifecycle: Register in SwarmRegistry
             self._swarm_agent.register()
             
-            run_limit = (self.config.max_iterations + 20)
+            run_limit = (self.config.swarm_max_iterations)
             event_generator = self._swarm_agent.engine.run(
                 state.get_agent_messages_ref(),
                 system_config,

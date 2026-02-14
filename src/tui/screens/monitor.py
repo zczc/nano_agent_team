@@ -9,6 +9,7 @@ import time
 import fcntl
 from typing import Dict, Optional, List
 from backend.utils.logger import Logger
+from backend.infra.config import Config
 from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import Static, Input, ListView, ListItem, Label, Markdown, ContentSwitcher
@@ -23,6 +24,8 @@ from ..components.plan_widget import PlanWidget
 # --- Constants ---
 MAX_CACHED_ENTRIES = 20  # Max log entries cached per agent in memory
 MAX_TRAJECTORY_WIDGETS = 20  # Max trajectory widgets visible in UI
+
+from backend.utils.file_utils import sanitize_filename
 
 # --- Widgets ---
 
@@ -298,10 +301,9 @@ class AgentMonitorScreen(Screen):
 
     def __init__(self, blackboard_dir: Optional[str] = None):
         super().__init__()
-        # Always use Config.BLACKBOARD_ROOT as the source of truth
+        # Always use Config.BLACKBOARD_ROOT as the source of truth (not cached)
         from backend.infra.config import Config
-        self.blackboard_dir = Config.BLACKBOARD_ROOT
-        Logger.info(f"[Monitor] Initialized with blackboard_dir from Config: {self.blackboard_dir}")
+        Logger.info(f"[Monitor] Using Config.BLACKBOARD_ROOT: {Config.BLACKBOARD_ROOT}")
         self.selected_agent: Optional[str] = None
         self.is_monitoring = False
         self.registry_worker: Optional[Worker] = None
@@ -338,7 +340,7 @@ class AgentMonitorScreen(Screen):
                     yield Static("Commands: Type message to intervene", classes="input-hint")
 
             # Right: Mission Plan
-            yield PlanWidget(blackboard_dir=self.blackboard_dir, id="plan-container")
+            yield PlanWidget(blackboard_dir=Config.BLACKBOARD_ROOT, id="plan-container")
 
     def on_mount(self):
         # Immediately load existing registry data before starting polling
@@ -355,7 +357,7 @@ class AgentMonitorScreen(Screen):
 
     def load_initial_registry(self):
         """Load existing registry data immediately on mount"""
-        registry_path = os.path.join(self.blackboard_dir, "registry.json")
+        registry_path = os.path.join(Config.BLACKBOARD_ROOT, "registry.json")
         try:
             if os.path.exists(registry_path):
                 with open(registry_path, 'r', encoding='utf-8') as f:
@@ -372,7 +374,7 @@ class AgentMonitorScreen(Screen):
     @work(exclusive=True, thread=True)
     def poll_registry(self):
         """Poll registry.json to update agent list and start background workers"""
-        registry_path = os.path.join(self.blackboard_dir, "registry.json")
+        registry_path = os.path.join(Config.BLACKBOARD_ROOT, "registry.json")
         last_mtime = 0
         
         while self.is_monitoring:
@@ -499,62 +501,89 @@ class AgentMonitorScreen(Screen):
         except Exception as e:
             Logger.error(f"[Monitor] Failed to refresh trajectory for {stripped_name}: {e}")
         
-        # Update Role from cache
+        # Update Role from cache (falls back to empty if not found)
         try:
-            role = self.agent_roles.get(stripped_name, "*Waiting for role data...*")
+            role = self.agent_roles.get(stripped_name, "")
             self.query_one("#role-display", Markdown).update(role)
         except Exception:
             pass  # Markdown widget may not be ready
 
     @work(thread=True)
     def tail_log_loop(self, agent_name: str):
-        """Persistent background tailer for an agent"""
-        log_path = os.path.join(self.blackboard_dir, "logs", f"{agent_name}.jsonl")
-        
-        # Wait for file
-        retries = 30
-        while self.is_monitoring and retries > 0 and not os.path.exists(log_path):
-            time.sleep(1.0)
-            retries -= 1
-        
-        if not os.path.exists(log_path):
-            Logger.info(f"[Monitor] Log file NOT found for {agent_name}: {log_path}")
-            return
+        """Persistent background tailer for an agent with retry mechanism."""
+        # Sanitize agent name for file path safety
+        safe_name = sanitize_filename(agent_name)
+        log_path = os.path.join(Config.BLACKBOARD_ROOT, "logs", f"{safe_name}.jsonl")
+        Logger.info(f"[Monitor] tail_log_loop started for {agent_name}, path: {log_path}, exists: {os.path.exists(log_path)}")
 
-        Logger.info(f"[Monitor] Tailer starting for {agent_name}: {log_path}")
-        try:
-            with open(log_path, 'r', encoding='utf-8') as f:
-                # 1. History
-                history = []
-                while self.is_monitoring:
-                    line = f.readline()
-                    if not line: break
-                    history.append(line)
-                    if len(history) >= 50:
-                        self.app.call_from_thread(self.process_log_batch, agent_name, list(history))
-                        history.clear()
-                
-                if history:
-                    self.app.call_from_thread(self.process_log_batch, agent_name, list(history))
-                
-                # 2. Live Tail
-                buffer = []
-                last_flush = time.time()
-                while self.is_monitoring:
-                    line = f.readline()
-                    if line:
-                        buffer.append(line)
-                    
-                    now = time.time()
-                    if buffer and (now - last_flush >= 1 or len(buffer) >= 20):
-                        self.app.call_from_thread(self.process_log_batch, agent_name, list(buffer))
-                        buffer.clear()
-                        last_flush = now
-                    
-                    if not line:
-                        time.sleep(2.0)  # 2s polling frequency
-        except Exception as e:
-            Logger.error(f"[Monitor] Log tailer error for {agent_name}: {e}")
+        # Track if we've successfully started tailing
+        max_retries = 5
+        retry_count = 0
+
+        while retry_count < max_retries and self.is_monitoring:
+            try:
+                # Wait for file with retry
+                retries = 30
+                while self.is_monitoring and retries > 0 and not os.path.exists(log_path):
+                    time.sleep(1.0)
+                    retries -= 1
+
+                if not self.is_monitoring:
+                    break
+
+                if not os.path.exists(log_path):
+                    Logger.warning(f"[Monitor] Log file NOT found for {agent_name} (attempt {retry_count + 1}/{max_retries}): {log_path}")
+                    retry_count += 1
+                    time.sleep(2)  # Wait before retry
+                    continue
+
+                Logger.info(f"[Monitor] Tailer starting for {agent_name}: {log_path}")
+
+                with open(log_path, 'r', encoding='utf-8') as f:
+                    # 1. Read all existing history at once
+                    lines = f.readlines()
+                    if lines:
+                        self.app.call_from_thread(self.process_log_batch, agent_name, lines)
+
+                    # 2. Live Tail - keep watching for new content
+                    buffer = []
+                    last_flush = time.time()
+                    file_pos = f.tell()
+
+                    while self.is_monitoring:
+                        # Read new lines
+                        new_lines = f.readlines()
+                        if new_lines:
+                            buffer.extend(new_lines)
+                            file_pos = f.tell()
+
+                        now = time.time()
+                        if buffer and (now - last_flush >= 1 or len(buffer) >= 20):
+                            self.app.call_from_thread(self.process_log_batch, agent_name, list(buffer))
+                            buffer.clear()
+                            last_flush = now
+
+                        if not new_lines:
+                            # File might have been rotated, check if it still exists
+                            if not os.path.exists(log_path):
+                                Logger.warning(f"[Monitor] Log file disappeared for {agent_name}, attempting to reconnect...")
+                                break
+                            time.sleep(1.0)  # Poll every 1s for new content
+
+                # If we exited the inner loop, try to reconnect
+                if self.is_monitoring:
+                    Logger.info(f"[Monitor] Reconnecting tailer for {agent_name}...")
+                    retry_count += 1
+                    time.sleep(1)
+
+            except Exception as e:
+                Logger.error(f"[Monitor] Log tailer error for {agent_name} (attempt {retry_count + 1}/{max_retries}): {e}")
+                retry_count += 1
+                if self.is_monitoring:
+                    time.sleep(2)  # Wait before retry
+
+        if retry_count >= max_retries:
+            Logger.error(f"[Monitor] Giving up on tailing {agent_name} after {max_retries} retries")
 
     def process_log_batch(self, agent_name: str, lines: List[str]):
         Logger.info(f"[Monitor] Processing batch for {agent_name}: {len(lines)} lines")
@@ -698,7 +727,7 @@ class AgentMonitorScreen(Screen):
         Send a message to agent's mailbox using queue mode.
         Messages are stored as a list to prevent loss.
         """
-        mailbox_dir = os.path.join(self.blackboard_dir, "mailboxes")
+        mailbox_dir = os.path.join(Config.BLACKBOARD_ROOT, "mailboxes")
         os.makedirs(mailbox_dir, exist_ok=True)
         mailbox_path = os.path.join(mailbox_dir, f"{agent_name}.json")
         

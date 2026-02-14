@@ -236,18 +236,13 @@ class FinishMessageWidget(Static):
         self.message = message
         
     def compose(self) -> ComposeResult:
-        import json
-        
-        # Try to parse content to get 'outcome' or display raw
         content = self.message.content
         display_text = content
         
-        try:
-            data = json.loads(content)
-            if isinstance(data, dict) and "outcome" in data:
-                display_text = data["outcome"]
-        except Exception:
-            pass
+        # Remove "Agent Finished." prefix if present to avoid redundancy with the header
+        # The content from FinishTool is: "Agent Finished.\n\nReason: ...\n\n===========================\n\nOutput: ..."
+        if "Agent Finished." in content:
+            display_text = content.replace("Agent Finished.", "").strip()
             
         yield Static("🏁 MISSION ACCOMPLISHED", classes="header")
         yield Markdown(display_text)
@@ -264,7 +259,7 @@ def create_message_widget(message: ChatMessage) -> Widget:
         return AssistantMessageWidget(message)
     elif message.role in ("tool_call", "tool_result"):
         # Special handling for finish tool call
-        if message.tool_name == "finish" and message.role == "tool_call":
+        if message.tool_name == "finish" and message.role == "tool_result":
              return FinishMessageWidget(message)
         return ToolMessageWidget(message)
     elif message.role == "thinking":

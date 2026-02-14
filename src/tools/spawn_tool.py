@@ -16,7 +16,7 @@ class SpawnSwarmAgentTool(BaseTool):
     Spawns a new Swarm Agent process (detached).
     Handles logging redirection and python environment consistency.
     """
-    def __init__(self, root_dir: str = ".blackboard", max_iterations: int = 50):
+    def __init__(self, root_dir: str = ".blackboard", max_iterations: int = 200):
         super().__init__()
         self.root_dir = root_dir
         self.log_dir = os.path.join(root_dir, "logs")

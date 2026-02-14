@@ -519,6 +519,16 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 - **Chat 模式**：单智能体对话，适用于简单查询和交互
 - **Swarm 模式**：启动 Watchdog 架构师，自动协调多智能体完成复杂任务
 
+**Slash 命令**：
+
+在输入框中支持以下斜杠命令：
+
+| 命令 | 说明 | 示例 |
+| --- | --- | --- |
+| `/iterations <n>` | 设置 Swarm 模式的最大迭代次数（10-500） | `/iterations 50` |
+| `/status` | 显示当前状态（模式、模型、迭代次数） | `/status` |
+| `/help` | 显示可用命令帮助信息 | `/help` |
+
 ### 3. 服务商配置 (Ctrl+P)
 
 **界面示例**：

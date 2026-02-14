@@ -359,7 +359,7 @@ class AgentEngine:
                     break
             else:
                 # If the loop finished without break, it means max_iterations was reached
-                yield AgentEvent(type="error", data={"error": f"Agent (PID: {os.getpid()}) has reached the maximum iteration limit ({max_iterations}), the agent is closed."})
+                yield AgentEvent(type="error", data={"error": f"Agent (PID: {os.getpid()}) has reached the maximum iteration limit ({max_iterations}), the agent is closed. You can use commend /iterations * to improve it."})
             
             # End of loop
             final_history = session.history if return_full_history else [session.history[-1]]
