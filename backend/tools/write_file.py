@@ -21,11 +21,9 @@ class WriteFileTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Write content to a file in the environment. Supported formats:\n"
-            "- Text: .txt, .md, .yaml, .yml (supports append for adding content without overwrite)\n"
-            "- Data: .json, .csv (comma-separated), .tsv (tab-separated)\n"
-            "- Documents: .docx (Word), .pdf\n"
-            "- Spreadsheet: .xlsx (Excel)"
+            "Write content to a file. "
+            "Use for: (1) creating NEW files, (2) complete content replacement, (3) appending content (set append=true). "
+            "Supports: .txt, .md, .yaml, .yml, .json, .csv, .tsv, .docx, .pdf, .xlsx."
         )
     
     @property

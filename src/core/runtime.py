@@ -6,6 +6,8 @@ import datetime
 import fcntl
 from typing import Any
 from src.utils.file_lock import file_lock
+from backend.utils.file_utils import sanitize_filename
+
 
 class RuntimeManager:
     """
@@ -51,8 +53,10 @@ class RuntimeManager:
         log_dir = os.path.join(blackboard_dir, "logs")
         if not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
-            
-        jsonl_path = os.path.join(log_dir, f"{name}.jsonl")
+
+        # Sanitize name for safe file path
+        safe_name = sanitize_filename(name)
+        jsonl_path = os.path.join(log_dir, f"{safe_name}.jsonl")
         log_entry = {
             "timestamp": time.time(),
             "type": event_type,

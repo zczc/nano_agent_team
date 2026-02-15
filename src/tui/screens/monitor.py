@@ -9,6 +9,7 @@ import time
 import fcntl
 from typing import Dict, Optional, List
 from backend.utils.logger import Logger
+from backend.infra.config import Config
 from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import Static, Input, ListView, ListItem, Label, Markdown, ContentSwitcher
@@ -23,6 +24,9 @@ from ..components.plan_widget import PlanWidget
 # --- Constants ---
 MAX_CACHED_ENTRIES = 20  # Max log entries cached per agent in memory
 MAX_TRAJECTORY_WIDGETS = 20  # Max trajectory widgets visible in UI
+LOG_POLL_INTERVAL = 1.0  # Seconds between polling all log files
+
+from backend.utils.file_utils import sanitize_filename
 
 # --- Widgets ---
 
@@ -298,10 +302,9 @@ class AgentMonitorScreen(Screen):
 
     def __init__(self, blackboard_dir: Optional[str] = None):
         super().__init__()
-        # Always use Config.BLACKBOARD_ROOT as the source of truth
+        # Always use Config.BLACKBOARD_ROOT as the source of truth (not cached)
         from backend.infra.config import Config
-        self.blackboard_dir = Config.BLACKBOARD_ROOT
-        Logger.info(f"[Monitor] Initialized with blackboard_dir from Config: {self.blackboard_dir}")
+        Logger.info(f"[Monitor] Using Config.BLACKBOARD_ROOT: {Config.BLACKBOARD_ROOT}")
         self.selected_agent: Optional[str] = None
         self.is_monitoring = False
         self.registry_worker: Optional[Worker] = None
@@ -309,11 +312,15 @@ class AgentMonitorScreen(Screen):
         # State mapping: agent_name -> data
         self.agent_entries: Dict[str, List[Dict]] = {}  # Cache log entries (capped)
         self.agent_roles: Dict[str, str] = {}
-        self.active_workers: Dict[str, Worker] = {}
         self.agent_list_cache: Dict[str, Dict] = {}
         # Track widget count per agent to avoid expensive DOM queries
         self.trajectory_widget_count: int = 0
         self._has_omitted_hint: bool = False
+
+        # Unified log polling state (single thread)
+        self._active_agent_logs: Dict[str, str] = {}  # agent_name -> log_path
+        self._file_positions: Dict[str, int] = {}  # agent_name -> file position
+        self._log_poll_worker: Optional[Worker] = None
 
     def compose(self) -> ComposeResult:
         yield Static("🔍 Swarm Agent Monitor", id="screen-header")
@@ -338,7 +345,7 @@ class AgentMonitorScreen(Screen):
                     yield Static("Commands: Type message to intervene", classes="input-hint")
 
             # Right: Mission Plan
-            yield PlanWidget(blackboard_dir=self.blackboard_dir, id="plan-container")
+            yield PlanWidget(blackboard_dir=Config.BLACKBOARD_ROOT, id="plan-container")
 
     def on_mount(self):
         # Immediately load existing registry data before starting polling
@@ -347,15 +354,15 @@ class AgentMonitorScreen(Screen):
         
     def on_unmount(self):
         self.is_monitoring = False
-        # Cancel all background workers to ensure clean teardown
+        # Cancel background workers to ensure clean teardown
         if self.registry_worker:
             self.registry_worker.cancel()
-        for w in self.active_workers.values():
-            w.cancel()
+        if self._log_poll_worker:
+            self._log_poll_worker.cancel()
 
     def load_initial_registry(self):
         """Load existing registry data immediately on mount"""
-        registry_path = os.path.join(self.blackboard_dir, "registry.json")
+        registry_path = os.path.join(Config.BLACKBOARD_ROOT, "registry.json")
         try:
             if os.path.exists(registry_path):
                 with open(registry_path, 'r', encoding='utf-8') as f:
@@ -368,11 +375,12 @@ class AgentMonitorScreen(Screen):
     def start_registry_polling(self):
         self.is_monitoring = True
         self.registry_worker = self.poll_registry()
+        self._log_poll_worker = self.poll_all_logs()
 
     @work(exclusive=True, thread=True)
     def poll_registry(self):
         """Poll registry.json to update agent list and start background workers"""
-        registry_path = os.path.join(self.blackboard_dir, "registry.json")
+        registry_path = os.path.join(Config.BLACKBOARD_ROOT, "registry.json")
         last_mtime = 0
         
         while self.is_monitoring:
@@ -387,6 +395,43 @@ class AgentMonitorScreen(Screen):
             except Exception as e:
                 Logger.debug(f"[Monitor] Registry poll error: {e}")
             time.sleep(2)
+
+    @work(exclusive=True, thread=True)
+    def poll_all_logs(self):
+        """Single thread to poll all agent log files"""
+        while self.is_monitoring:
+            try:
+                # Snapshot current agents to avoid modification during iteration
+                current_agents = list(self._active_agent_logs.items())
+
+                for agent_name, log_path in current_agents:
+                    if not self.is_monitoring:
+                        break
+                    try:
+                        if not os.path.exists(log_path):
+                            continue
+
+                        # Get last known position
+                        last_pos = self._file_positions.get(agent_name, 0)
+
+                        with open(log_path, 'r', encoding='utf-8') as f:
+                            f.seek(last_pos)
+                            new_lines = f.readlines()
+                            new_pos = f.tell()
+
+                        if new_lines:
+                            # Update position
+                            self._file_positions[agent_name] = new_pos
+                            # Process in main thread
+                            self.app.call_from_thread(self.process_log_batch, agent_name, new_lines)
+
+                    except Exception as e:
+                        Logger.debug(f"[Monitor] Log poll error for {agent_name}: {e}")
+
+            except Exception as e:
+                Logger.error(f"[Monitor] poll_all_logs error: {e}")
+
+            time.sleep(LOG_POLL_INTERVAL)
 
     def update_registry_data(self, data: Dict):
         # 1. Update Agent List UI
@@ -423,13 +468,23 @@ class AgentMonitorScreen(Screen):
                 if isinstance(first_item, AgentListItem):
                     self._select_agent_by_name(first_item.agent_name)
 
-        # 2. Check for new agents and start background tailing
+        # 2. Register new agents to unified log polling
         for agent_name, info in new_cache.items():
             if agent_name not in self.agent_entries:
                 # Init per-agent cache
                 self.agent_entries[agent_name] = []
-                # Start background tailer
-                self.active_workers[agent_name] = self.tail_log_loop(agent_name)
+                # Register to unified polling
+                safe_name = sanitize_filename(agent_name)
+                log_path = os.path.join(Config.BLACKBOARD_ROOT, "logs", f"{safe_name}.jsonl")
+                self._active_agent_logs[agent_name] = log_path
+                self._file_positions[agent_name] = 0  # Start from beginning
+
+        # 3. Remove agents that are no longer in registry from polling
+        for agent_name in list(self._active_agent_logs.keys()):
+            if agent_name not in new_cache:
+                del self._active_agent_logs[agent_name]
+                if agent_name in self._file_positions:
+                    del self._file_positions[agent_name]
 
     @on(ListView.Selected, "#agent-list")
     def on_agent_selected(self, event: ListView.Selected):
@@ -499,62 +554,12 @@ class AgentMonitorScreen(Screen):
         except Exception as e:
             Logger.error(f"[Monitor] Failed to refresh trajectory for {stripped_name}: {e}")
         
-        # Update Role from cache
+        # Update Role from cache (falls back to empty if not found)
         try:
-            role = self.agent_roles.get(stripped_name, "*Waiting for role data...*")
+            role = self.agent_roles.get(stripped_name, "")
             self.query_one("#role-display", Markdown).update(role)
         except Exception:
             pass  # Markdown widget may not be ready
-
-    @work(thread=True)
-    def tail_log_loop(self, agent_name: str):
-        """Persistent background tailer for an agent"""
-        log_path = os.path.join(self.blackboard_dir, "logs", f"{agent_name}.jsonl")
-        
-        # Wait for file
-        retries = 30
-        while self.is_monitoring and retries > 0 and not os.path.exists(log_path):
-            time.sleep(1.0)
-            retries -= 1
-        
-        if not os.path.exists(log_path):
-            Logger.info(f"[Monitor] Log file NOT found for {agent_name}: {log_path}")
-            return
-
-        Logger.info(f"[Monitor] Tailer starting for {agent_name}: {log_path}")
-        try:
-            with open(log_path, 'r', encoding='utf-8') as f:
-                # 1. History
-                history = []
-                while self.is_monitoring:
-                    line = f.readline()
-                    if not line: break
-                    history.append(line)
-                    if len(history) >= 50:
-                        self.app.call_from_thread(self.process_log_batch, agent_name, list(history))
-                        history.clear()
-                
-                if history:
-                    self.app.call_from_thread(self.process_log_batch, agent_name, list(history))
-                
-                # 2. Live Tail
-                buffer = []
-                last_flush = time.time()
-                while self.is_monitoring:
-                    line = f.readline()
-                    if line:
-                        buffer.append(line)
-                    
-                    now = time.time()
-                    if buffer and (now - last_flush >= 1 or len(buffer) >= 20):
-                        self.app.call_from_thread(self.process_log_batch, agent_name, list(buffer))
-                        buffer.clear()
-                        last_flush = now
-                    
-                    if not line:
-                        time.sleep(2.0)  # 2s polling frequency
-        except Exception as e:
-            Logger.error(f"[Monitor] Log tailer error for {agent_name}: {e}")
 
     def process_log_batch(self, agent_name: str, lines: List[str]):
         Logger.info(f"[Monitor] Processing batch for {agent_name}: {len(lines)} lines")
@@ -634,54 +639,61 @@ class AgentMonitorScreen(Screen):
             elif evt_type == "error":
                 new_items.append({"type": "error", "content": get_truncated(data.get("error", "Unknown Error")), "timestamp": timestamp})
 
-            # 3. Commit to Cache and Update UI if selected
-            scroll = self.query_one("#trajectory-scroll", VerticalScroll)
+            # 3. Commit to Cache
+            # Only update UI if this agent is currently selected
             is_active = (self.selected_agent == agent_name)
-            
-            # Smart Scroll: Check if at bottom BEFORE mounting
-            at_bottom = False
-            if is_active:
-                at_bottom = scroll.scroll_y >= scroll.max_scroll_y
 
             for item_data in new_items:
                 self.agent_entries[agent_name].append(item_data)
-                
+
                 # Cap in-memory cache per agent
                 entries = self.agent_entries[agent_name]
                 if len(entries) > MAX_CACHED_ENTRIES:
                     self.agent_entries[agent_name] = entries[-MAX_CACHED_ENTRIES:]
-                
-                if is_active:
-                    # Mount new trajectory widget
-                    try:
-                        scroll.mount(TrajectoryItem(
-                            item_data["type"], 
-                            item_data["content"], 
-                            item_data["timestamp"]
-                        ))
-                        self.trajectory_widget_count += 1
-                    except Exception as e:
-                        Logger.error(f"[Monitor] Failed to mount live trajectory item: {e}")
-                    
-                    # Maintain windowed UI using counter (avoids expensive DOM queries)
-                    if self.trajectory_widget_count > MAX_TRAJECTORY_WIDGETS:
-                        if not self._has_omitted_hint:
-                            # First overflow: remove oldest widget, add hint
-                            first_child = scroll.children[0] if scroll.children else None
-                            if first_child:
-                                first_child.remove()
-                                self.trajectory_widget_count -= 1
-                            scroll.mount(Static("... (Earlier history omitted)", classes="omitted-hint"), before=0)
-                            self._has_omitted_hint = True
-                        else:
-                            # Subsequent overflow: remove first real item (after hint)
-                            if len(scroll.children) > 1:
-                                scroll.children[1].remove()
-                                self.trajectory_widget_count -= 1
 
-            # Smart Scroll: Apply
-            if is_active and at_bottom:
-                scroll.scroll_end(animate=False)
+                # Skip UI update for non-active agents (only cache)
+                if not is_active:
+                    continue
+
+                # Only update UI for selected agent
+                try:
+                    scroll = self.query_one("#trajectory-scroll", VerticalScroll)
+                except Exception:
+                    continue  # Widget not ready
+
+                # Smart Scroll: Check if at bottom BEFORE mounting
+                at_bottom = scroll.scroll_y >= scroll.max_scroll_y
+
+                # Mount new trajectory widget
+                try:
+                    scroll.mount(TrajectoryItem(
+                        item_data["type"],
+                        item_data["content"],
+                        item_data["timestamp"]
+                    ))
+                    self.trajectory_widget_count += 1
+                except Exception as e:
+                    Logger.error(f"[Monitor] Failed to mount live trajectory item: {e}")
+
+                # Maintain windowed UI using counter (avoids expensive DOM queries)
+                if self.trajectory_widget_count > MAX_TRAJECTORY_WIDGETS:
+                    if not self._has_omitted_hint:
+                        # First overflow: remove oldest widget, add hint
+                        first_child = scroll.children[0] if scroll.children else None
+                        if first_child:
+                            first_child.remove()
+                            self.trajectory_widget_count -= 1
+                        scroll.mount(Static("... (Earlier history omitted)", classes="omitted-hint"), before=0)
+                        self._has_omitted_hint = True
+                    else:
+                        # Subsequent overflow: remove first real item (after hint)
+                        if len(scroll.children) > 1:
+                            scroll.children[1].remove()
+                            self.trajectory_widget_count -= 1
+
+                # Smart Scroll: Apply
+                if at_bottom:
+                    scroll.scroll_end(animate=False)
 
         except Exception as e:
             Logger.error(f"[Monitor] Error processing log line: {e}")
@@ -698,7 +710,7 @@ class AgentMonitorScreen(Screen):
         Send a message to agent's mailbox using queue mode.
         Messages are stored as a list to prevent loss.
         """
-        mailbox_dir = os.path.join(self.blackboard_dir, "mailboxes")
+        mailbox_dir = os.path.join(Config.BLACKBOARD_ROOT, "mailboxes")
         os.makedirs(mailbox_dir, exist_ok=True)
         mailbox_path = os.path.join(mailbox_dir, f"{agent_name}.json")
         

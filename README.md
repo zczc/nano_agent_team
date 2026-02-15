@@ -508,6 +508,16 @@ https://github.com/user-attachments/assets/1e6cf2fd-8832-4fe6-b6a5-fd7787075686
 - **Chat mode**: single-agent chat, good for simple queries
 - **Swarm mode**: launches Watchdog to coordinate multi-agent tasks
 
+**Slash Commands**:
+
+The input box supports the following slash commands:
+
+| Command | Description | Example |
+| --- | --- | --- |
+| `/iterations <n>` | Set max swarm iterations (10-500) | `/iterations 50` |
+| `/status` | Show current status (mode, model, iterations) | `/status` |
+| `/help` | Show available commands help | `/help` |
+
 ### 3. Provider Configuration (Ctrl+P)
 
 **Example UI**:

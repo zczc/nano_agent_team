@@ -53,7 +53,7 @@ class SwarmAgent:
         name: str = "Assistant",
         blackboard_dir: str = ".blackboard",
         model: str = None,
-        max_iterations: int = 100,
+        max_iterations: int = 200,
         extra_strategies: List[Any] = None
     ):
         self.role = role
@@ -76,7 +76,7 @@ class SwarmAgent:
             ),
             FinishTool(),
             AskUserTool(),
-            SpawnSwarmAgentTool(blackboard_dir, max_iterations=max_iterations if max_iterations else 50)
+            SpawnSwarmAgentTool(blackboard_dir, max_iterations=max_iterations)
         ]
         
         # Initialize Engine with specific strategies
@@ -91,7 +91,7 @@ class SwarmAgent:
             NotificationAwarenessMiddleware(blackboard_dir),
             ActivityLoggerMiddleware(name, blackboard_dir),
             SwarmAgentGuardMiddleware(name, blackboard_dir),
-            ExecutionBudgetManager(max_iterations=max_iterations if max_iterations else 50)
+            ExecutionBudgetManager(max_iterations=max_iterations)
         ]
         
         # Note: We explicitly add middlewares here because AgentEngine 
@@ -167,7 +167,7 @@ class SwarmAgent:
                 # We use a large max_iterations because the Agent is expected to run long-term
                 # controlled by WaitTool and external events.
                 # We add a buffer to engine.run so ExecutionBudgetManager (soft limit) triggers first.
-                run_limit = (self.max_iterations + 20) if self.max_iterations else 100
+                run_limit = self.max_iterations + 20
                 event_generator = self.engine.run(messages, system_config, max_iterations=run_limit)
                 
                 while True:
