@@ -4,7 +4,7 @@ import shutil
 import shlex
 import sys
 from typing import Optional, Dict, List, Callable
-from backend.infra.environment import Environment
+from backend.infra.environment import Environment, FileNotFoundError as EnvFileNotFoundError, PermissionError as EnvPermissionError, EnvironmentError as EnvError, CommandError
 
 class LocalEnvironment(Environment):
     """
@@ -137,14 +137,17 @@ class LocalEnvironment(Environment):
 
     def read_file(self, path: str) -> str:
         if not os.path.exists(path):
-            return f"Error: File '{path}' not found."
+            raise EnvFileNotFoundError(f"File '{path}' not found.")
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 return f.read()
         except UnicodeDecodeError:
-             return f"Error: File '{path}' is binary or not valid UTF-8."
+            raise EnvFileNotFoundError(f"File '{path}' is binary or not valid UTF-8.")
+        except PermissionError as e:
+            raise EnvPermissionError(f"Permission denied reading '{path}': {e}")
         except Exception as e:
-            return f"Error reading file '{path}': {str(e)}"
+            from backend.infra.environment import EnvironmentError
+            raise EnvironmentError(f"Error reading file '{path}': {e}")
 
     def write_file(self, path: str, content: str) -> str:
         """
@@ -165,7 +168,7 @@ class LocalEnvironment(Environment):
                  f"**Allow this write operation?**"
              )
              if not self._request_confirmation(msg):
-                 return f"Error: Write operation to '{path}' denied by user."
+                 raise EnvPermissionError(f"Write operation to '{path}' denied by user.")
         
         # Explicit Path Restriction (e.g., for Subagents restricted to Blackboard)
         if self.allowed_write_paths:
@@ -175,7 +178,7 @@ class LocalEnvironment(Environment):
                     is_allowed = True
                     break
             if not is_allowed:
-                 return f"Error: Write denied. This agent is restricted to writing only in: {self.allowed_write_paths}"
+                 raise EnvPermissionError(f"Write denied. This agent is restricted to writing only in: {self.allowed_write_paths}")
 
         try:
             os.makedirs(os.path.dirname(abs_path), exist_ok=True)
@@ -183,7 +186,7 @@ class LocalEnvironment(Environment):
                 f.write(content)
             return f"Successfully wrote to file '{path}'."
         except Exception as e:
-            return f"Error writing file '{path}': {str(e)}"
+            raise EnvError(f"Error writing file '{path}': {e}")
 
     def file_exists(self, path: str) -> bool:
         return os.path.exists(path)

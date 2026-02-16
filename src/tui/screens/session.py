@@ -543,7 +543,9 @@ Be concise and helpful. Format your responses using markdown when appropriate.""
         if self.agent:
             if self.agent.is_running:
                 self.agent.stop()
-            
+            # Shutdown the old agent (marks DEAD in registry, terminates child agents)
+            self.agent.shutdown()
+
             self.agent.clear_history()
             # Note: We don't refresh ID or clean blackboard here.
             # It will happen lazily on the next active message.
@@ -573,6 +575,11 @@ Be concise and helpful. Format your responses using markdown when appropriate.""
             self.notify("Agent stopped")
         else:
             self.notify("Agent is not running", severity="information")
+
+    def on_unmount(self):
+        """Clean up when session screen is removed (app exit, screen switch)."""
+        if self.agent:
+            self.agent.shutdown()
 
     def action_cycle_model(self):
         """Cycle through recent models using global app logic"""

@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from backend.tools.base import BaseTool
 from src.utils.file_lock import file_lock, LockTimeoutError
 from backend.llm.decorators import schema_strict_validator
+from src.core.protocol import parse_frontmatter
 
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -118,7 +119,7 @@ Operations:
         Validate the central_plan.md content if it is a central plan.
         Returns an error message if invalid, else None.
         """
-        _, body = self._parse_frontmatter(content)
+        _, body = parse_frontmatter(content)
         
         # 1. Extract JSON block
         json_start = body.find("```json")
@@ -194,41 +195,8 @@ Operations:
                 
                 if unfulfilled_deps and status == "PENDING":
                     return f"Invalid central_plan: Task {tid} is PENDING but has unfulfilled dependencies: {unfulfilled_deps}. Status should be BLOCKED."
-        
-        return None
 
-    def _parse_frontmatter(self, content: str) -> Tuple[Dict, str]:
-        """Simple and robust frontmatter parser"""
-        if content.startswith("---"):
-            # Handle both \r\n and \n
-            # We look for the second --- marker
-            try:
-                # Find the end of the first marker line
-                first_newline = content.find("\n")
-                if first_newline == -1: return {}, content
-                
-                # Find the start of the closing marker
-                # We search for \n---\n or \n--- (at end of file or followed by newline)
-                end_marker_pos = content.find("\n---", first_newline)
-                if end_marker_pos == -1: return {}, content
-                
-                fm_section = content[first_newline+1:end_marker_pos].strip()
-                body_start = content.find("\n", end_marker_pos + 1)
-                if body_start == -1:
-                    body = "" # No body after closing marker
-                else:
-                    body = content[body_start+1:]
-                
-                try:
-                    meta = yaml.safe_load(fm_section)
-                    return meta if isinstance(meta, dict) else {}, body
-                except yaml.YAMLError as e:
-                    from backend.utils.logger import Logger
-                    Logger.error(f"[BlackboardTool] YAML Parse Error in frontmatter: {e}")
-                    return {}, content
-            except Exception:
-                return {}, content
-        return {}, content
+        return None
 
     def _sanitize_index_name(self, name: str) -> str:
         """Strip 'global_indices/' prefix if agent included it by mistake"""
@@ -249,8 +217,8 @@ Operations:
                 try:
                     with open(fpath, 'r', encoding='utf-8') as f:
                         # Read enough to cover frontmatter. 8KB should be plenty for metadata.
-                        content = f.read(8192) 
-                        meta, _ = self._parse_frontmatter(content)
+                        content = f.read(8192)
+                        meta, _ = parse_frontmatter(content)
                         # Default values
                         item = {}
                         # Update with all meta fields
@@ -273,8 +241,8 @@ Operations:
         with file_lock(fpath, 'r', fcntl.LOCK_SH, timeout=self.lock_timeout) as fd:
             if fd is None: return f"Error: Could not open {filename}"
             content = fd.read()
-            
-        meta, body = self._parse_frontmatter(content)
+
+        meta, body = parse_frontmatter(content)
         
         return json.dumps({
             "metadata": meta,
@@ -322,10 +290,10 @@ Operations:
             # Verify YAML frontmatter integrity in new content
             if not content.startswith("---"):
                 return "Error: Metadata Missing. content MUST start with '---' followed by YAML frontmatter."
-            
+
             try:
                 # Validate the new content has a parseable frontmatter
-                test_meta, _ = self._parse_frontmatter(content)
+                test_meta, _ = parse_frontmatter(content)
                 if not test_meta:
                     return "Error: Failed to parse YAML frontmatter in the provided content."
             except Exception as e:
@@ -367,7 +335,7 @@ Operations:
                 return f"Error: CAS Failed. Plan has changed. Current checksum: {current_checksum}"
             
             # 2. Parse JSON
-            meta, body = self._parse_frontmatter(content)
+            meta, body = parse_frontmatter(content)
             try:
                 # Find JSON block
                 json_start = body.find("```json")
@@ -404,7 +372,7 @@ Operations:
                 
                 # Double check the reconstructed content is valid before writing
                 try:
-                    verify_meta, _ = self._parse_frontmatter(new_content)
+                    verify_meta, _ = parse_frontmatter(new_content)
                     if not verify_meta and meta:
                         return "Error: Reconstructed content has invalid YAML frontmatter."
                 except Exception as ve:
@@ -429,7 +397,7 @@ Operations:
             return f"Index '{filename}' already exists."
 
         # 1. Parse Frontmatter and Validate Requirements
-        meta, _ = self._parse_frontmatter(content)
+        meta, _ = parse_frontmatter(content)
         if not content.startswith("---"):
              return "Error: Metadata Missing. content MUST start with '---' followed by YAML frontmatter."
         

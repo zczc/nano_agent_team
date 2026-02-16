@@ -1,7 +1,6 @@
 openai>=1.0.0
 anthropic>=0.3.0
 google-generativeai>=0.3.0
-python-dotenv
 termcolor
 colorama
 requests
@@ -18,3 +17,4 @@ browser-use>=0.1.0
 playwright>=1.40.0
 nest-asyncio>=1.5.0
 python-socks>=2.0.0
+docker

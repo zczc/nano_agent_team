@@ -233,7 +233,7 @@ The core agent class that encapsulates LLM calls, tool execution, and middleware
 **Related files**:
 
 - `src/core/agent_wrapper.py`
-- `src/core/middlewares.py`
+- `src/core/middlewares/`
 - `src/core/runtime.py`
 - `src/core/prompt_builder.py`
 - `backend/llm/engine.py`
@@ -297,7 +297,8 @@ Runtime and lifecycle management:
 **Related files**:
 
 - `src/core/runtime.py`
-- `src/core/middlewares.py`
+- `src/core/middlewares/`
+- `src/utils/registry_manager.py`
 - `src/tools/status_tool.py`
 
 ---
@@ -676,13 +677,21 @@ src/
 ├── core/                       # Core logic
 │   ├── __init__.py
 │   ├── agent_wrapper.py        # SwarmAgent core class
-│   ├── middlewares.py          # Middleware system
+│   ├── middlewares/             # Middleware system (modular)
+│   │   ├── __init__.py
+│   │   ├── watchdog_guard.py       # Watchdog coordination guard
+│   │   ├── dependency_guard.py     # Task dependency guard
+│   │   ├── mailbox.py              # Agent communication mailbox
+│   │   ├── swarm_state.py          # Swarm state tracking
+│   │   ├── swarm_agent_guard.py    # Worker agent guard
+│   │   ├── activity_logger.py      # Activity logging
+│   │   ├── notification_awareness.py # Notification awareness
+│   │   ├── request_monitor.py      # Request monitoring
+│   │   └── parent_process_monitor.py # Parent process monitor
 │   ├── prompt_builder.py       # Prompt builder
 │   ├── protocol.py             # Blackboard protocol parser
 │   ├── schema.py               # Data models
-│   ├── runtime.py              # Runtime management
-│   └── ipc/                    # Inter-process communication
-│       └── request_manager.py  # Request manager
+│   └── runtime.py              # Runtime management
 │
 ├── prompts/                    # System prompts
 │   └── architect.md            # Watchdog architect prompt
@@ -692,7 +701,8 @@ src/
 │   ├── spawn_tool.py           # Agent spawning tool
 │   ├── wait_tool.py            # Wait tool
 │   ├── status_tool.py          # Status update tool
-│   └── finish_tool.py          # Task completion tool
+│   ├── finish_tool.py          # Task completion tool
+│   └── ask_user_tool.py        # User interaction tool
 │
 ├── tui/                        # TUI UI code
 │   ├── app.py                  # TUI main application class
@@ -715,7 +725,8 @@ src/
 │       └── monitor.py          # Monitor screen
 │
 └── utils/                      # Utilities
-    └── file_lock.py            # File lock (prevent conflicts)
+    ├── file_lock.py            # File lock (prevent conflicts)
+    └── registry_manager.py     # Agent registry manager
 ```
 
 ### backend/ - Backend Infrastructure
@@ -767,6 +778,7 @@ backend/
 
 ```
 .blackboard/session_<timestamp>
+├── registry.json               # Agent registry (status, PIDs)
 ├── global_indices/
 ├── resources/
 ├── mailboxes/

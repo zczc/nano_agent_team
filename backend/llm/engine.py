@@ -28,7 +28,7 @@ import json
 import uuid
 import datetime
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import List, Dict, Any, Tuple, Optional, Generator
 from backend.utils.json_utils import repair_truncated_json
 from backend.llm.types import AgentSession, SystemPromptConfig
@@ -51,8 +51,9 @@ class AgentEngine:
                  provider_key: str = None, 
                  depth: int = 0, 
                  skill_registry: Any = None, 
-                 parallel_tools: bool = True, 
+                 parallel_tools: bool = True,
                  max_parallel_workers: int = 5,
+                 tool_timeout: int = 300,
                  tool_context: Optional[Dict[str, Any]] = None):
         """
         Initialize Agent Engine
@@ -91,6 +92,7 @@ class AgentEngine:
         self.depth = depth
         self.parallel_tools = parallel_tools
         self.max_parallel_workers = max_parallel_workers
+        self.tool_timeout = tool_timeout
         self.skill_registry = skill_registry
         self.tool_context = tool_context or {}
 
@@ -290,9 +292,9 @@ class AgentEngine:
                     """Execute single tool call, return (tc, result, fn_name, args)"""
                     fn_name = tc["function"]["name"]
                     args_str = tc["function"]["arguments"]
-                    try: 
+                    try:
                         args = json.loads(args_str)
-                    except: 
+                    except json.JSONDecodeError:
                         # Attempt to repair truncated JSON
                         repaired_str, args = repair_truncated_json(args_str)
                         if args is not None:
@@ -315,17 +317,32 @@ class AgentEngine:
                     
                     return (tc, result, fn_name, args)
                 
-                # Execute tool calls (parallel or serial)
+                # Execute tool calls (parallel or serial) with timeout protection
                 if self.parallel_tools and len(tool_calls) > 1:
                     # Parallel execution, limit max workers
                     max_workers = min(len(tool_calls), self.max_parallel_workers)
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         futures = [executor.submit(execute_single_tool, tc) for tc in tool_calls]
-                        # Collect results in original order
-                        tool_results = [f.result() for f in futures]
+                        tool_results = []
+                        for i, f in enumerate(futures):
+                            try:
+                                tool_results.append(f.result(timeout=self.tool_timeout))
+                            except FuturesTimeoutError:
+                                fn_name = tool_calls[i]["function"]["name"]
+                                error_result = f"Error: Tool '{fn_name}' execution timed out after {self.tool_timeout}s."
+                                tool_results.append((tool_calls[i], error_result, fn_name, {}))
                 else:
-                    # Serial execution
-                    tool_results = [execute_single_tool(tc) for tc in tool_calls]
+                    # Serial execution with timeout
+                    tool_results = []
+                    for tc in tool_calls:
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            future = executor.submit(execute_single_tool, tc)
+                            try:
+                                tool_results.append(future.result(timeout=self.tool_timeout))
+                            except FuturesTimeoutError:
+                                fn_name = tc["function"]["name"]
+                                error_result = f"Error: Tool '{fn_name}' execution timed out after {self.tool_timeout}s."
+                                tool_results.append((tc, error_result, fn_name, {}))
                 
                 # Process results in order
                 for tc, result, fn_name, args in tool_results:
@@ -337,7 +354,8 @@ class AgentEngine:
                                 for item in search_data:
                                     if isinstance(item, dict) and item.get("href") and not any(x.get("href") == item.get("href") for x in search_citations):
                                         search_citations.append(item)
-                        except: pass
+                        except json.JSONDecodeError:
+                            pass
                     
                     yield AgentEvent(type="tool_result", data={
                         "tool_call_id": tc["id"],

@@ -233,7 +233,7 @@ Watchdog 就像是项目的**产品经理或架构师**，它的核心职责并�
 **相关文件**：
 
 - `src/core/agent_wrapper.py`
-- `src/core/middlewares.py`
+- `src/core/middlewares/`
 - `src/core/runtime.py`
 - `src/core/prompt_builder.py`
 - `backend/llm/engine.py`
@@ -297,7 +297,8 @@ Watchdog 就像是项目的**产品经理或架构师**，它的核心职责并�
 **相关文件**：
 
 - `src/core/runtime.py`
-- `src/core/middlewares.py`
+- `src/core/middlewares/`
+- `src/utils/registry_manager.py`
 - `src/tools/status_tool.py`
 
 ---
@@ -687,13 +688,21 @@ src/
 ├── core/                       # 核心逻辑模块
 │   ├── __init__.py
 │   ├── agent_wrapper.py        # SwarmAgent 核心类
-│   ├── middlewares.py          # 中间件系统
+│   ├── middlewares/             # 中间件系统（模块化）
+│   │   ├── __init__.py
+│   │   ├── watchdog_guard.py       # Watchdog 协调守卫
+│   │   ├── dependency_guard.py     # 任务依赖守卫
+│   │   ├── mailbox.py              # 智能体通信信箱
+│   │   ├── swarm_state.py          # Swarm 状态追踪
+│   │   ├── swarm_agent_guard.py    # Worker 智能体守卫
+│   │   ├── activity_logger.py      # 活动日志
+│   │   ├── notification_awareness.py # 通知感知
+│   │   ├── request_monitor.py      # 请求监控
+│   │   └── parent_process_monitor.py # 父进程监控
 │   ├── prompt_builder.py       # 提示词构建器
 │   ├── protocol.py             # 黑板协议解析
 │   ├── schema.py               # 数据模型定义
-│   ├── runtime.py              # 运行时管理
-│   └── ipc/                    # 进程间通信
-│       └── request_manager.py  # 请求管理器
+│   └── runtime.py              # 运行时管理
 │
 ├── prompts/                    # 系统提示词
 │   └── architect.md            # Watchdog 架构师提示词
@@ -703,7 +712,8 @@ src/
 │   ├── spawn_tool.py           # 智能体生成工具
 │   ├── wait_tool.py            # 等待工具
 │   ├── status_tool.py          # 状态更新工具
-│   └── finish_tool.py          # 任务完成工具
+│   ├── finish_tool.py          # 任务完成工具
+│   └── ask_user_tool.py        # 用户交互工具
 │
 ├── tui/                        # TUI 界面代码
 │   ├── app.py                  # TUI 主应用类
@@ -726,7 +736,8 @@ src/
 │       └── monitor.py          # 监控界面
 │
 └── utils/                      # 实用工具
-    └── file_lock.py            # 文件锁（防止并发冲突）
+    ├── file_lock.py            # 文件锁（防止并发冲突）
+    └── registry_manager.py     # 智能体注册表管理器
 ```
 
 ### backend/ - 后端基础设施
@@ -778,6 +789,7 @@ backend/
 
 ```
 .blackboard/session_<timestamp>
+├── registry.json               # 智能体注册表（状态、PID）
 ├── global_indices/
 ├── resources/
 ├── mailboxes/

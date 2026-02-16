@@ -7,7 +7,8 @@ Provides unified interface for LLM client creation, abstracting differences betw
 import os
 import json
 import uuid
-from typing import Optional, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Optional, TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -38,6 +39,26 @@ try:
     HAS_GOOGLE = True
 except ImportError:
     HAS_GOOGLE = False
+
+# --- Mock Response Classes for Adapter Compatibility ---
+
+@dataclass
+class MockToolCall:
+    id: str
+    function: object
+
+@dataclass
+class MockMessage:
+    content: str = ""
+    tool_calls: Optional[List[MockToolCall]] = None
+
+@dataclass
+class MockChoice:
+    message: MockMessage
+
+@dataclass
+class MockResponse:
+    choices: List[MockChoice] = field(default_factory=list)
 
 # --- Anthropic Adapter Classes ---
 
@@ -179,23 +200,18 @@ class AnthropicAdapter:
                                 "arguments": json.dumps(block.input)
                             }
                         })
-                
-                class MockResponse:
-                    def __init__(self, content, tool_calls):
-                        self.choices = [self.Choice(content, tool_calls)]
-                    class Choice:
-                        def __init__(self, content, tool_calls):
-                            self.message = self.Message(content, tool_calls)
-                        class Message:
-                            def __init__(self, content, tool_calls):
-                                self.content = content
-                                self.tool_calls = [
-                                    type('obj', (object,), {
-                                        "id": tc["id"],
-                                        "function": type('obj', (object,), tc["function"])
-                                    }) for tc in tool_calls
-                                ] if tool_calls else None
-                return MockResponse(content, tool_calls)
+
+                # Use shared dataclasses
+                mock_tool_calls = [
+                    MockToolCall(
+                        id=tc["id"],
+                        function=type('obj', (object,), tc["function"])
+                    ) for tc in tool_calls
+                ] if tool_calls else None
+
+                mock_message = MockMessage(content=content, tool_calls=mock_tool_calls)
+                mock_choice = MockChoice(message=mock_message)
+                return MockResponse(choices=[mock_choice])
 
             def _stream_response(self, api_kwargs):
                 with self.client.messages.stream(**api_kwargs) as stream:
@@ -325,23 +341,18 @@ class GeminiAdapter:
                                 "arguments": json.dumps(dict(part.function_call.args))
                             }
                         })
-                
-                class MockResponse:
-                    def __init__(self, content, tool_calls):
-                        self.choices = [self.Choice(content, tool_calls)]
-                    class Choice:
-                        def __init__(self, content, tool_calls):
-                            self.message = self.Message(content, tool_calls)
-                        class Message:
-                            def __init__(self, content, tool_calls):
-                                self.content = content
-                                self.tool_calls = [
-                                    type('obj', (object,), {
-                                        "id": tc["id"],
-                                        "function": type('obj', (object,), tc["function"])
-                                    }) for tc in tool_calls
-                                ] if tool_calls else None
-                return MockResponse(content, tool_calls)
+
+                # Use shared dataclasses
+                mock_tool_calls = [
+                    MockToolCall(
+                        id=tc["id"],
+                        function=type('obj', (object,), tc["function"])
+                    ) for tc in tool_calls
+                ] if tool_calls else None
+
+                mock_message = MockMessage(content=content, tool_calls=mock_tool_calls)
+                mock_choice = MockChoice(message=mock_message)
+                return MockResponse(choices=[mock_choice])
 
             def _stream_response(self, chat_session, message):
                 response = chat_session.send_message(message or " ", stream=True)

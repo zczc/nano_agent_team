@@ -2,7 +2,7 @@ import os
 import tempfile
 import shutil
 from typing import Optional, Dict, Any
-from backend.infra.environment import Environment
+from backend.infra.environment import Environment, FileNotFoundError as EnvFileNotFoundError, EnvironmentError as EnvError
 
 class DockerEnvironment(Environment):
     """
@@ -46,7 +46,7 @@ class DockerEnvironment(Environment):
     def workdir(self) -> str:
         return self._workdir
 
-    def run_command(self, command: str, cwd: Optional[str] = None, env_vars: Optional[Dict[str, str]] = None, timeout: int = 60) -> str:
+    def run_command(self, command: str, cwd: Optional[str] = None, env_vars: Optional[Dict[str, str]] = None, timeout: int = 60, background: bool = False) -> str:
         if not self.container:
             return "Error: Docker container is not active."
 
@@ -81,28 +81,33 @@ class DockerEnvironment(Environment):
             return f"Error executing command in Docker: {str(e)}"
 
     def read_file(self, path: str) -> str:
-        if not self.container: return "Error: Container not active."
-        
+        if not self.container:
+            raise EnvError("Docker container is not active.")
+
         # Simple implementation: cat the file
         # For more robust binary handling, uses get_archive but that returns tar stream
         # cat is fine for text
         res = self.run_command(f"cat {path}")
         if "Command failed" in res and "No such file" in res:
-             return f"Error: File '{path}' not found."
+            raise EnvFileNotFoundError(f"File '{path}' not found in container.")
         return res
 
     def write_file(self, path: str, content: str) -> str:
-        if not self.container: return "Error: Container not active."
-        
+        if not self.container:
+            raise EnvError("Docker container is not active.")
+
         # Write using shell redirection. Be careful with escaping.
         # Ideally use copy mechanism or encoded write
-        # Simple approach: write to temp local then copy? 
+        # Simple approach: write to temp local then copy?
         # But we want to avoid dependency on local fs state if possible.
         # Base64 approach is robust for shell writing
         import base64
         b64_content = base64.b64encode(content.encode('utf-8')).decode('utf-8')
         cmd = f"echo '{b64_content}' | base64 -d > {path}"
-        return self.run_command(cmd)
+        result = self.run_command(cmd)
+        if "Command failed" in result:
+            raise EnvError(f"Error writing file '{path}' in container: {result}")
+        return f"Successfully wrote to file '{path}'."
 
     def file_exists(self, path: str) -> bool:
         res = self.run_command(f"test -e {path} && echo 'yes' || echo 'no'")

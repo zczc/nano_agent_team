@@ -373,14 +373,18 @@ class SwarmTUI(App):
         """Command: Select model (filtered by provider if selected)"""
         # Primary filter: Explicitly selected provider
         provider_filter = state.selected_provider_id
-        
+
         # Fallback filter: Current model's provider
         if not provider_filter and state.current_model:
             provider_filter = state.current_model.provider_id
-            
-        if provider_filter:
-            self.notify(f"Showing models for {provider_filter}", severity="information")
-            
+
+        # If no provider is selected at all, prompt user to select one first
+        if not provider_filter:
+            self.notify("Please connect a provider first (Ctrl+P)", severity="warning")
+            return
+
+        self.notify(f"Showing models for {provider_filter}", severity="information")
+
         # Use on_dismiss mechanism (callback arg to push_screen)
         # The dialog returns the selected model_info (or None)
         self.push_screen(

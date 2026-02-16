@@ -67,13 +67,12 @@ class WriteFileTool(BaseTool):
             # Let's try shell append for efficiency if env supports run_command.
             
             if append:
-                # Basic text append via shell
-                # Note: This is a bit fragile with complex content.
-                # Let's check if we can simply read+write.
                 if self.env.file_exists(file_path):
-                    existing = self.env.read_file(file_path)
-                    if not existing.startswith("Error"):
+                    try:
+                        existing = self.env.read_file(file_path)
                         content = existing + content
+                    except Exception:
+                        pass  # File doesn't exist or can't be read, just write new content
                 
                 # Proceed to overwrite with new total content
                 return self.env.write_file(file_path, content)
@@ -124,9 +123,11 @@ class WriteFileTool(BaseTool):
         
         # Write/Append
         if append and self.env.file_exists(file_path):
-             existing = self.env.read_file(file_path)
-             if not existing.startswith("Error"):
-                 final_csv = existing + final_csv
+            try:
+                existing = self.env.read_file(file_path)
+                final_csv = existing + final_csv
+            except Exception:
+                pass  # File can't be read, just write new content
 
         self.env.write_file(file_path, final_csv)
         action = "Appended to" if append else "Successfully wrote to"

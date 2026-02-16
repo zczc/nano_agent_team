@@ -41,7 +41,7 @@ Use this when you are waiting for other agents to reply or post tasks.
             "type": "object",
             "properties": {
                 "duration": {
-                    "type": "integer",
+                    "type": "number",
                     "default": 15,
                     "description": "Maximum wait time in seconds (strictly ≤ 15s)."
                 },
@@ -49,6 +49,10 @@ Use this when you are waiting for other agents to reply or post tasks.
                     "type": "boolean",
                     "default": True,
                     "description": "If true, returns early if any file in global_indices is modified."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional reason for waiting (used for logging/protocol enforcement)."
                 }
             }
         }

@@ -99,6 +99,14 @@ class AgentBridge:
         """Set callback for user confirmation (e.g. for dangerous tool storage)"""
         self._confirmation_callback = callback
 
+    def _get_model_key_for_browser(self) -> Optional[str]:
+        """Callback injected into BrowserUseTool to get current model key."""
+        try:
+            from src.tui.state import state
+            return state.get_model_key()
+        except Exception:
+            return None
+
     def set_input_callback(self, callback: Callable[[str], str]):
         """Set callback for user input (e.g. for AskUserTool)"""
         self._input_callback = callback
@@ -209,7 +217,7 @@ class AgentBridge:
                 EditFileTool(env=env),
                 GrepTool(),
                 GlobTool(),
-                BrowserUseTool(env=env),
+                BrowserUseTool(get_model_key_fn=self._get_model_key_for_browser),
             ]
 
         # Initialize engine with strategies
@@ -403,8 +411,8 @@ class AgentBridge:
                                 args = json.loads(fn.get("arguments", "{}"))
                                 question = args.get("question", "")
                                 pending_ask_user[tc.get("id")] = question
-                            except:
-                                pass
+                            except (json.JSONDecodeError, KeyError):
+                                pass  # Non-critical
                         
                         yield ChatMessage(
                             role="tool_call",
@@ -439,8 +447,8 @@ class AgentBridge:
                             import json
                             finish_data = json.loads(result) if result.startswith("{") else {"reason": result}
                             reason = finish_data.get("reason", result)
-                        except:
-                            reason = result
+                        except (json.JSONDecodeError, KeyError):
+                            reason = result  # Non-critical
                         
                         state.add_agent_message("assistant", f"[Task Completed] {reason}")
                         
@@ -500,30 +508,32 @@ class AgentBridge:
         state.sync_blackboard_root()
         from backend.infra.config import Config
         os.makedirs(Config.BLACKBOARD_ROOT, exist_ok=True)
-        
+
         # Only re-initialize if model or blackboard root actually changed
         current_init_key = (state.get_model_key(), Config.BLACKBOARD_ROOT)
         if current_init_key != self._last_init_key:
             self.initialize()
             self._last_init_key = current_init_key
-        
+
         self._is_running = True
-        
+
         # Add user message to shared state
         state.add_agent_message("user", message)
         yield ChatMessage(role="user", content=message)
-        
+
         # Build system prompt from SwarmAgent's prompt builder
         sys_prompt_content = self._swarm_agent.prompt_builder.build(
-            self._swarm_agent.role, 
+            self._swarm_agent.role,
             self.config.scenario
         )
         system_config = SystemPromptConfig(base_prompt=sys_prompt_content)
-        
+
         try:
-            # Lifecycle: Register in SwarmRegistry
+            # Lifecycle: Register as RUNNING in SwarmRegistry
+            # In TUI mode, we keep the agent alive across messages (RUNNING → IDLE → RUNNING)
+            # Only shutdown() will set it to DEAD.
             self._swarm_agent.register()
-            
+
             run_limit = (self.config.swarm_max_iterations)
             event_generator = self._swarm_agent.engine.run(
                 state.get_agent_messages_ref(),
@@ -535,28 +545,41 @@ class AgentBridge:
                 forward_to_swarm=True,
                 handle_finish_tool=True
             )
-                    
+
         except KeyboardInterrupt:
             yield ChatMessage(role="assistant", content="[Interrupted]")
         except Exception as e:
             yield ChatMessage(role="assistant", content=f"Error: {str(e)}", is_error=True)
         finally:
             self._is_running = False
-            # Lifecycle: Always deregister (DEAD status) to terminate child agents
-            # This happens for both FinishTool and ctrl+K
+            # Lifecycle: Set to IDLE (not DEAD) between messages.
+            # This keeps child agents alive while the TUI session is active.
+            # DEAD is only set via shutdown() when the session truly ends.
             if self._swarm_agent:
-                self._swarm_agent.deregister()
+                self._swarm_agent.registry.update_agent(
+                    self._swarm_agent.name, status="IDLE"
+                )
     
     def stop(self):
-        """Stop the current agent execution immediately"""
+        """Stop the current agent execution immediately (ctrl+K style)"""
         self._is_running = False
-        
+
         # Force close the current event generator to stop blocking API calls
         if self._current_generator:
             try:
                 self._current_generator.close()
             except Exception:
                 pass  # Ignore errors during forced closure
+
+    def shutdown(self):
+        """
+        Fully shut down the agent and mark as DEAD in registry.
+        Call this when the TUI session is truly ending (e.g., app exit, session switch).
+        This will cause all child agents to detect parent DEAD and terminate.
+        """
+        self.stop()
+        if self._swarm_agent:
+            self._swarm_agent.deregister()
     
     def clear_history(self):
         """Clear conversation history (shared state)"""

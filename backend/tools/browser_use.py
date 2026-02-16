@@ -17,6 +17,9 @@ try:
 except ImportError:  # pragma: no cover
     nest_asyncio = None
 
+# Module-level flag to prevent repeated nest_asyncio.apply() calls
+_nest_asyncio_applied = False
+
 from backend.infra.config import Config
 from backend.tools.base import BaseTool
 from backend.utils.logger import Logger
@@ -78,6 +81,14 @@ def check_browser_installed() -> bool:
 class BrowserUseTool(BaseTool):
     """A bridge to the browser-use agent for executing multi-step browsing tasks."""
 
+    def __init__(self, get_model_key_fn=None):
+        """
+        Args:
+            get_model_key_fn: Optional callable that returns the current model key string.
+                              Injected from TUI layer to avoid backend -> src dependency.
+        """
+        self._get_model_key_fn = get_model_key_fn
+
     # ── properties ──────────────────────────────────────────────
 
     @property
@@ -115,17 +126,16 @@ class BrowserUseTool(BaseTool):
 
     # ── LLM creation (per-execution) ────────────────────────────
 
-    @staticmethod
-    def _get_model_key() -> Optional[str]:
-        """Read current provider/model key from TUI state."""
-        try:
-            from src.tui.state import state
-            key = state.get_model_key()
-            if key:
-                Logger.info(f"[BrowserUseTool] Using model from TUI state: {key}")
-                return key
-        except Exception as e:
-            Logger.debug(f"[BrowserUseTool] TUI state not available: {e}")
+    def _resolve_model_key(self) -> Optional[str]:
+        """Read current provider/model key, preferring injected callback."""
+        if self._get_model_key_fn:
+            try:
+                key = self._get_model_key_fn()
+                if key:
+                    Logger.info(f"[BrowserUseTool] Using model from injected callback: {key}")
+                    return key
+            except Exception as e:
+                Logger.debug(f"[BrowserUseTool] Injected callback failed: {e}")
         return None
 
     @staticmethod
@@ -147,7 +157,7 @@ class BrowserUseTool(BaseTool):
 
     def _build_llm(self) -> Optional[BaseChatModel]:
         """Create a fresh LLM client for a single execution."""
-        model_key = self._get_model_key()
+        model_key = self._resolve_model_key()
         if not model_key:
             Logger.error("[BrowserUseTool] No model selected. Please select a model in TUI first.")
             return None
@@ -235,7 +245,11 @@ class BrowserUseTool(BaseTool):
             Logger.error(msg)
             return msg
 
-        nest_asyncio.apply()
+        global _nest_asyncio_applied
+        if not _nest_asyncio_applied:
+            nest_asyncio.apply()
+            _nest_asyncio_applied = True
+
         return asyncio.get_event_loop().run_until_complete(coro)
 
     # ── helpers ──────────────────────────────────────────────────

@@ -1,6 +1,29 @@
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
 
+
+class EnvironmentError(Exception):
+    """Base exception for environment operations."""
+    pass
+
+
+class FileNotFoundError(EnvironmentError):
+    """Raised when a file is not found in the environment."""
+    pass
+
+
+class PermissionError(EnvironmentError):
+    """Raised when a permission error occurs in the environment."""
+    pass
+
+
+class CommandError(EnvironmentError):
+    """Raised when a command execution fails."""
+    def __init__(self, message: str, exit_code: int = None):
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
 class Environment(ABC):
     """
     Abstract base class for Agent execution environments.
@@ -13,7 +36,6 @@ class Environment(ABC):
         """Get the current working directory."""
         pass
 
-    @abstractmethod
     @abstractmethod
     def run_command(self, command: str, cwd: Optional[str] = None, env_vars: Optional[Dict[str, str]] = None, timeout: int = 60, background: bool = False) -> str:
         """
@@ -49,13 +71,17 @@ class Environment(ABC):
     def write_file(self, path: str, content: str) -> str:
         """
         Write content to file.
-        
+
         Args:
             path: Absolute or relative path to the file.
             content: String content to write.
-            
+
         Returns:
-            Success message or error message.
+            Success message.
+
+        Raises:
+            PermissionError: If write is denied by security policy.
+            EnvironmentError: If write fails for other reasons.
         """
         pass
     

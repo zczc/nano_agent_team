@@ -204,9 +204,21 @@ class Config:
         except Exception:
             pass # Silent failure for state loading
 
+    _initialized = False
+
+    @classmethod
+    def _ensure_initialized(cls):
+        """Lazy initialization: only initialize on first access."""
+        if not cls._initialized:
+            cls.initialize()
+
     @classmethod
     def initialize(cls, keys_path: str = None):
         """Initialize configuration"""
+        if cls._initialized:
+            return
+        cls._initialized = True
+
         cls.load_settings()
         
         # Load interaction state (active model)
@@ -238,11 +250,8 @@ class Config:
     def get_provider_config(cls, model_id: str) -> Dict[str, Any]:
         """
         Core method: Get LLM configuration
-        
-        Args:
-            model_id: Can be a provider ID (e.g. "openai") or "provider/model" (e.g. "openai/gpt-4o")
-                      or simply a model ID reference from llm_config settings.
         """
+        cls._ensure_initialized()
         
         
         # 1. Parse Input
@@ -337,6 +346,7 @@ class Config:
     
     @classmethod
     def get_all_providers(cls) -> Dict[str, Any]:
+        cls._ensure_initialized()
         return cls._llm_config.get("providers", {})
         
     @classmethod
@@ -391,6 +401,4 @@ class Config:
             ]
             cls.save_llm_config()
 
-
-# 默认初始化
-Config.initialize()
+# Lazy initialization: Config.initialize() is called on first access via _ensure_initialized()

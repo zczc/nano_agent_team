@@ -10,6 +10,7 @@ import json
 import re
 import uuid
 import shutil
+import threading
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Generator
 from backend.llm.types import AgentSession
@@ -165,7 +166,7 @@ class SemanticDriftGuard(StrategyMiddleware):
             drift_reminder = (
                 f"\n--- REMINDER ---\n"
                 f"You are in a long reasoning chain (Step {iteration}). "
-                f"Ensure your current actions still align with your original goal: {original_prompt[:200]}..."
+                f"Ensure your current actions still align with your original goal: {original_prompt[:600]}..."
                 f"\nIf the goal is achieved, provide the final answer immediately."
             )
             session.system_config.extra_sections.append(drift_reminder)
@@ -244,6 +245,7 @@ class ToolResultCacheMiddleware(StrategyMiddleware):
         self.session_id = uuid.uuid4().hex[:8]
         self.cache_dir = os.path.join(os.getcwd(), ".agent_cache", self.session_id)
         self._cached_files = set()  # Track cached files
+        self._cache_lock = threading.Lock()  # Thread safety for cache access
     
     def __call__(self, session: AgentSession, next_call: Callable[[AgentSession], Any]) -> Any:
         # 1. Count current LLM call turns (assistant messages)
@@ -297,18 +299,19 @@ class ToolResultCacheMiddleware(StrategyMiddleware):
         """Cache content to file"""
         # Ensure cache directory exists
         os.makedirs(self.cache_dir, exist_ok=True)
-        
+
         tool_name = msg.get("name", "unknown")
         tool_call_id = msg.get("tool_call_id", "")[:8]
         filename = f"{tool_name}_{tool_call_id}.txt"
         file_path = os.path.join(self.cache_dir, filename)
-        
-        # Avoid duplicate writes
-        if file_path not in self._cached_files:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            self._cached_files.add(file_path)
-        
+
+        # Avoid duplicate writes with thread safety
+        with self._cache_lock:
+            if file_path not in self._cached_files:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                self._cached_files.add(file_path)
+
         return file_path
     
     def cleanup(self):
@@ -325,8 +328,8 @@ class ToolResultCacheMiddleware(StrategyMiddleware):
         if os.path.exists(parent_dir) and not os.listdir(parent_dir):
             try:
                 os.rmdir(parent_dir)
-            except:
-                pass
+            except OSError:
+                pass  # Non-critical cleanup
 
 class InteractionRefinementMiddleware(StrategyMiddleware):
     """
@@ -358,7 +361,7 @@ class InteractionRefinementMiddleware(StrategyMiddleware):
                     try:
                         args = json.loads(tool_call["function"]["arguments"])
                         question = args.get("question", "")
-                    except:
+                    except (json.JSONDecodeError, KeyError):
                         question = tool_call["function"]["arguments"]
                         
                     # 2. Extract the answer from tool result

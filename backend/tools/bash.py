@@ -67,10 +67,8 @@ class BashTool(BaseTool):
              pass
 
     @schema_strict_validator
-    def execute(self, command: str = None, cmd: str = None, cwd: Optional[str] = None, wait: bool = True) -> str:
-        # Support legacy 'cmd' parameter
-        final_command = command or cmd
-        if not final_command:
+    def execute(self, command: str = None, cwd: Optional[str] = None, wait: bool = True) -> str:
+        if not command:
             return "Error: Command is required."
 
         if not self.env:
@@ -78,4 +76,4 @@ class BashTool(BaseTool):
 
         # Delegate execution to the environment
         # The environment implementation handles safety checks (Local) or API calls (E2B/Docker)
-        return self.env.run_command(final_command, cwd=cwd, background=(not wait))
+        return self.env.run_command(command, cwd=cwd, background=(not wait))

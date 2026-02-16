@@ -64,8 +64,6 @@ class EditFileTool(BaseTool):
                 return f"Error: File '{file_path}' does not exist."
 
             content = self.env.read_file(file_path)
-            if content.startswith("Error"):
-                return content
 
             occurrences = content.count(old_str)
             
@@ -77,13 +75,10 @@ class EditFileTool(BaseTool):
 
             # Perform unique replacement
             new_content = content.replace(old_str, new_str)
-            
+
             # Write back
-            result = self.env.write_file(file_path, new_content)
-            if result.startswith("Success") or "Success" in result:
-                return "success"
-            else:
-                return result
+            self.env.write_file(file_path, new_content)
+            return "success"
                 
         except Exception as e:
             return f"Error editing file '{file_path}': {str(e)}"

@@ -110,7 +110,7 @@ class SwarmStatusTool(BaseTool):
             with open(path, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
                 content_tail = "".join(lines[-5:])
-        except:
+        except (IOError, OSError):
             content_tail = "Error reading file"
             
         return {

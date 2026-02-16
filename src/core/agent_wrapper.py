@@ -1,11 +1,12 @@
 
 import os
 import sys
+import signal
 from typing import List, Generator, Any
 import datetime
 import time
-import fcntl
 from src.utils.file_lock import file_lock
+from src.utils.registry_manager import RegistryManager
 
 # Backend imports should now be available from local directory
 # project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
@@ -59,6 +60,7 @@ class SwarmAgent:
         self.role = role
         self.name = name
         self.blackboard_dir = blackboard_dir
+        self.registry = RegistryManager(blackboard_dir)
         
         # Update Global Config for Path Substitution
         from backend.infra.config import Config
@@ -109,8 +111,20 @@ class SwarmAgent:
                     "agent_model": model,
                     "agent_name": name  # Pass agent name for parent tracking
                 })
-        
-        # Register simplified signal handlers if needed, or rely on Engine's handling
+
+        # Register SIGTERM handler for graceful shutdown (cleanup registry before exit)
+        # This may fail in TUI worker threads — that's OK, TUI has its own shutdown path.
+        def _sigterm_handler(signum, frame):
+            try:
+                self.deregister()
+            except Exception:
+                pass
+            sys.exit(0)
+
+        try:
+            signal.signal(signal.SIGTERM, _sigterm_handler)
+        except (ValueError, OSError):
+            pass  # Not in main thread/interpreter (e.g. Textual worker), skip
         
     def add_tool(self, tool: BaseTool):
         self.tools.append(tool)
@@ -160,119 +174,92 @@ class SwarmAgent:
         max_engine_retries = 3  # Maximum times to restart the engine on connection errors
         engine_retry_count = 0
         
-        while engine_retry_count < max_engine_retries:
-            try:
-                self.register() # Ensure agent is registered on startup
-                
-                # We use a large max_iterations because the Agent is expected to run long-term
-                # controlled by WaitTool and external events.
-                # We add a buffer to engine.run so ExecutionBudgetManager (soft limit) triggers first.
-                run_limit = self.max_iterations + 20
-                event_generator = self.engine.run(messages, system_config, max_iterations=run_limit)
-                
-                while True:
-                    try:
-                        event = next(event_generator)
-                        self.handle_event(event)
+        try:
+            self.register()  # Register once before entering retry loop
 
-                        # Check for termination signal
-                        if event.type == "tool_result" and event.data.get("name") == "finish":
-                             print(f"[{self.name}] Detected 'finish' tool call. Stopping loop.")
-                             return  # Normal exit, don't retry
+            while engine_retry_count < max_engine_retries:
+                try:
+                    # We use a large max_iterations because the Agent is expected to run long-term
+                    # controlled by WaitTool and external events.
+                    # We add a buffer to engine.run so ExecutionBudgetManager (soft limit) triggers first.
+                    run_limit = self.max_iterations + 20
+                    event_generator = self.engine.run(messages, system_config, max_iterations=run_limit)
 
-                    except StopIteration:
-                        return  # Normal completion, don't retry
-                        
-            except KeyboardInterrupt:
-                print("\n[SwarmAgent] Interrupted by user.")
-                return  # User interrupt, don't retry
-                
-            except Exception as e:
-                error_msg = str(e).lower()
-                
-                # Check if this is a recoverable connection error
-                is_connection_error = any(keyword in error_msg for keyword in [
-                    'connection', 'timeout', 'network', 'refused', 
-                    'unreachable', 'timed out', 'temporary failure'
-                ])
-                
-                if is_connection_error and engine_retry_count < max_engine_retries - 1:
-                    engine_retry_count += 1
-                    retry_delay = 5 * engine_retry_count  # Exponential backoff: 5s, 10s, 15s
-                    print(f"\n[SwarmAgent] Connection error detected: {e}")
-                    print(f"[SwarmAgent] Retrying engine in {retry_delay}s... (Attempt {engine_retry_count}/{max_engine_retries})")
-                    
-                    # Log the retry attempt
-                    from collections import namedtuple
-                    Event = namedtuple("Event", ["type", "data"])
-                    self.handle_event(Event(
-                        type="lifecycle", 
-                        data={
-                            "event": "connection_retry",
-                            "reason": f"Retrying due to connection error: {e}",
-                            "attempt": engine_retry_count,
-                            "max_retries": max_engine_retries
-                        }
-                    ))
-                    
-                    import time
-                    time.sleep(retry_delay)
-                    continue  # Retry the entire engine.run()
-                else:
-                    # Non-recoverable error or max retries reached
-                    print(f"\n[SwarmAgent] Critical Error: {e}")
-                    if is_connection_error:
-                        print(f"[SwarmAgent] Max retries ({max_engine_retries}) reached for connection errors.")
-                    
-                    # Log the error
-                    from collections import namedtuple
-                    Event = namedtuple("Event", ["type", "data"])
-                    self.handle_event(Event(type="error", data={"error": str(e)}))
-                    
-                    # Log lifecycle termination
-                    self.handle_event(Event(
-                        type="lifecycle", 
-                        data={"event": "terminated", "reason": "Self-terminated or normal exit"}
-                    ))
-                    return  # Exit without retry
-            finally:
-                # Always deregister when exiting (only called once at the end)
-                self.deregister()
+                    while True:
+                        try:
+                            event = next(event_generator)
+                            self.handle_event(event)
+
+                            # Check for termination signal
+                            if event.type == "tool_result" and event.data.get("name") == "finish":
+                                 print(f"[{self.name}] Detected 'finish' tool call. Stopping loop.")
+                                 return  # Normal exit, don't retry
+
+                        except StopIteration:
+                            return  # Normal completion, don't retry
+
+                except KeyboardInterrupt:
+                    print("\n[SwarmAgent] Interrupted by user.")
+                    return  # User interrupt, don't retry
+
+                except Exception as e:
+                    error_msg = str(e).lower()
+
+                    # Check if this is a recoverable connection error
+                    is_connection_error = any(keyword in error_msg for keyword in [
+                        'connection', 'timeout', 'network', 'refused',
+                        'unreachable', 'timed out', 'temporary failure'
+                    ])
+
+                    if is_connection_error and engine_retry_count < max_engine_retries - 1:
+                        engine_retry_count += 1
+                        retry_delay = 5 * engine_retry_count  # Exponential backoff: 5s, 10s, 15s
+                        print(f"\n[SwarmAgent] Connection error detected: {e}")
+                        print(f"[SwarmAgent] Retrying engine in {retry_delay}s... (Attempt {engine_retry_count}/{max_engine_retries})")
+
+                        # Log the retry attempt
+                        from collections import namedtuple
+                        Event = namedtuple("Event", ["type", "data"])
+                        self.handle_event(Event(
+                            type="lifecycle",
+                            data={
+                                "event": "connection_retry",
+                                "reason": f"Retrying due to connection error: {e}",
+                                "attempt": engine_retry_count,
+                                "max_retries": max_engine_retries
+                            }
+                        ))
+
+                        import time
+                        time.sleep(retry_delay)
+                        continue  # Retry the entire engine.run()
+                    else:
+                        # Non-recoverable error or max retries reached
+                        print(f"\n[SwarmAgent] Critical Error: {e}")
+                        if is_connection_error:
+                            print(f"[SwarmAgent] Max retries ({max_engine_retries}) reached for connection errors.")
+
+                        # Log the error
+                        from collections import namedtuple
+                        Event = namedtuple("Event", ["type", "data"])
+                        self.handle_event(Event(type="error", data={"error": str(e)}))
+
+                        # Log lifecycle termination
+                        self.handle_event(Event(
+                            type="lifecycle",
+                            data={"event": "terminated", "reason": "Self-terminated or normal exit"}
+                        ))
+                        return  # Exit without retry
+        finally:
+            # Always deregister when exiting (only called once at the end)
+            self.deregister()
 
     def register(self):
         """Registers the agent in registry.json at startup."""
-        import json
-        import time
-        registry_path = os.path.join(self.blackboard_dir, "registry.json")
-        try:
-            # Use file lock for safe update
-            with file_lock(registry_path, 'r+', fcntl.LOCK_EX, timeout=10) as fd:
-                if fd is None:
-                    # Should be created by file_lock if not exists
-                    pass
-                
-                content = fd.read()
-                try:
-                    registry = json.loads(content) if content else {}
-                except json.JSONDecodeError:
-                    registry = {}
-
-                # 2. Update/Add Entry
-                registry[self.name] = {
-                    "pid": os.getpid(),
-                    "role": self.role,
-                    "status": "RUNNING",
-                    "start_time": time.time()
-                }
-                    
-                # 3. Write Back
-                fd.seek(0)
-                json.dump(registry, fd, indent=2, ensure_ascii=False)
-                fd.truncate()
-                
+        if self.registry.register_agent(self.name, self.role):
             print(f"[{self.name}] Registered in blackboard registry.")
-        except Exception as e:
-            print(f"[{self.name}] Failed to register: {e}")
+        else:
+            print(f"[{self.name}] Failed to register.")
 
     def deregister(self):
         """Updates the agent's status to DEAD in registry.json on exit."""

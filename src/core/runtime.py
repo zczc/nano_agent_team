@@ -6,6 +6,7 @@ import datetime
 import fcntl
 from typing import Any
 from src.utils.file_lock import file_lock
+from src.utils.registry_manager import RegistryManager
 from backend.utils.file_utils import sanitize_filename
 
 
@@ -19,27 +20,11 @@ class RuntimeManager:
     def cleanup_agent(name: str, blackboard_dir: str, reason: str = "Self-terminated or normal exit"):
         """Performs full blackboard cleanup for a closing agent."""
         # 1. Update Registry to DEAD
-        registry_path = os.path.join(blackboard_dir, "registry.json")
-        try:
-            with file_lock(registry_path, 'r+', fcntl.LOCK_EX, timeout=10) as fd:
-                if fd:
-                    content = fd.read()
-                    try:
-                        registry = json.loads(content) if content else {}
-                    except json.JSONDecodeError:
-                        registry = {}
-                    
-                    if name in registry:
-                        registry[name]["status"] = "DEAD"
-                        registry[name]["exit_time"] = time.time()
-                        registry[name]["exit_reason"] = reason
-                        
-                        fd.seek(0)
-                        json.dump(registry, fd, indent=2, ensure_ascii=False)
-                        fd.truncate()
+        registry = RegistryManager(blackboard_dir)
+        if registry.deregister_agent(name, reason):
             print(f"[{name}] Status updated to DEAD in registry.")
-        except Exception as e:
-            print(f"[{name}] Failed to update registry status during cleanup: {e}")
+        else:
+            print(f"[{name}] Failed to update registry status during cleanup.")
 
         # 2. Log Termination Event
         RuntimeManager.log_event(name, blackboard_dir, "lifecycle", {"event": "terminated", "reason": reason})

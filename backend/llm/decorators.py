@@ -134,8 +134,9 @@ def output_sanitizer(max_length: int = 2000):
                     result_str = str(result)
                 
                 # Truncate if too long
-                if len(result_str) > max_length:
-                    result_str = result_str[:max_length] + f"\n\n[Output truncated due to length... original size: {len(result_str)} characters]"
+                original_length = len(result_str)
+                if original_length > max_length:
+                    result_str = result_str[:max_length] + f"\n\n[Output truncated due to length... original size: {original_length} characters]"
                 
                 return result_str
             except Exception as e:

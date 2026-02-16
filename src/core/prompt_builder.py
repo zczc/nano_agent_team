@@ -153,6 +153,7 @@ You interact with other agents and the system by reading and writing files.
             f"- **Python Version**: {sys.version.split()[0]}",
             f"- **Working Directory**: {os.getcwd()}"
         ]
+        return "\n".join(info)
 
     def _get_indices_prompt(self) -> str:
         if not os.path.exists(self.indices_dir):
