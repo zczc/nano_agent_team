@@ -23,13 +23,13 @@ def file_lock(full_path: str, mode: str = 'r+', lock_type = fcntl.LOCK_EX, timeo
     Yields:
         File object (or None if file not found and mode is read-only).
     """
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
-    
-    # Ensure file exists for 'r+' or 'w' modes if it doesn't logic is handled by caller usually,
-    # but for 'r+' we need file to exist.
+    # Only create directories for write modes
+    if any(m in mode for m in ['w', 'a']):
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+    # For 'r+' mode, raise FileNotFoundError if file doesn't exist
     if not os.path.exists(full_path) and 'r' in mode and '+' in mode:
-         with open(full_path, 'w') as f:
-            f.write('')
+        raise FileNotFoundError(f"File does not exist: {full_path}")
 
     try:
         fd = open(full_path, mode, encoding='utf-8')
@@ -38,16 +38,22 @@ def file_lock(full_path: str, mode: str = 'r+', lock_type = fcntl.LOCK_EX, timeo
          yield None
          return
 
-    use_signal = (threading.current_thread() is threading.main_thread())
+    use_signal = False
     old_handler = None
     start = time.monotonic()
-    
+
     def timeout_handler(signum, frame):
         raise LockTimeoutError(f"Lock timeout ({timeout}s): {full_path}")
-    
-    if use_signal:
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout)
+
+    if threading.current_thread() is threading.main_thread():
+        try:
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout)
+            use_signal = True
+        except (ValueError, OSError):
+            # signal.signal() fails in sub-interpreters or Textual worker threads
+            # even when threading reports "main thread". Fall back to polling.
+            use_signal = False
     
     try:
         if use_signal:
