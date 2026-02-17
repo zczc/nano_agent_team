@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from backend.utils.logger import Logger
 
 # Ensure project root is in path
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -355,6 +355,8 @@ class AgentBridge:
         
         # Track ask_user tool calls to convert them to natural messages
         pending_ask_user = {}  # tool_call_id -> question
+        # Track finish tool calls for special rendering with resolved paths
+        pending_finish = set()  # tool_call_ids
         
         try:
             for event in event_generator:
@@ -413,6 +415,10 @@ class AgentBridge:
                                 pending_ask_user[tc.get("id")] = question
                             except (json.JSONDecodeError, KeyError):
                                 pass  # Non-critical
+
+                        # Track finish calls for special rendering
+                        if tool_name == "finish":
+                            pending_finish.add(tc.get("id"))
                         
                         yield ChatMessage(
                             role="tool_call",
@@ -425,12 +431,21 @@ class AgentBridge:
                     tool_name = res.get("name", "tool")
                     tool_call_id = res.get("tool_call_id")
                     result = res.get("result", "")
-                    
-                    yield ChatMessage(
-                        role="tool_result",
-                        content=result[:200],
-                        tool_name=tool_name
-                    )
+
+                    # Special rendering for finish: use full result (paths already resolved)
+                    if tool_name == "finish" and tool_call_id in pending_finish:
+                        pending_finish.discard(tool_call_id)
+                        yield ChatMessage(
+                            role="tool_result",
+                            content=result,
+                            tool_name=tool_name
+                        )
+                    else:
+                        yield ChatMessage(
+                            role="tool_result",
+                            content=result[:200],
+                            tool_name=tool_name
+                        )
                     
                     # Special handling for ask_user: save as assistant + user messages
                     if tool_name == "ask_user" and tool_call_id in pending_ask_user:

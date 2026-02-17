@@ -26,6 +26,7 @@ class LocalEnvironment(Environment):
         """
         self._workdir = os.path.abspath(workspace_root)
         self.sandbox_root = self._workdir
+        self.blackboard_dir = os.path.abspath(blackboard_dir) if blackboard_dir else None
         self.allowed_write_paths = [os.path.abspath(p) for p in allowed_write_paths] if allowed_write_paths else None
         self.confirmation_callback = confirmation_callback
         self.non_interactive = non_interactive
@@ -161,14 +162,18 @@ class LocalEnvironment(Environment):
         # Security Check for Write
         abs_path = os.path.abspath(path)
         if not abs_path.startswith(self.sandbox_root):
-             msg = (
-                 f"### ⚠️ [SECURITY ALERT] Write Outside Sandbox\n\n"
-                 f"**Target**: `{abs_path}`\n\n"
-                 f"**Sandbox**: `{self.sandbox_root}`\n\n"
-                 f"**Allow this write operation?**"
-             )
-             if not self._request_confirmation(msg):
-                 raise EnvPermissionError(f"Write operation to '{path}' denied by user.")
+            # Auto-approve blackboard paths
+            if self.blackboard_dir and abs_path.startswith(self.blackboard_dir):
+                pass  # Blackboard path, auto-approved
+            else:
+                msg = (
+                    f"### ⚠️ [SECURITY ALERT] Write Outside Sandbox\n\n"
+                    f"**Target**: `{abs_path}`\n\n"
+                    f"**Sandbox**: `{self.sandbox_root}`\n\n"
+                    f"**Allow this write operation?**"
+                )
+                if not self._request_confirmation(msg):
+                    raise EnvPermissionError(f"Write operation to '{path}' denied by user.")
         
         # Explicit Path Restriction (e.g., for Subagents restricted to Blackboard)
         if self.allowed_write_paths:
@@ -232,6 +237,9 @@ class LocalEnvironment(Environment):
                 if part.startswith("/"):
                     part_abs = os.path.abspath(part)
                     if not part_abs.startswith(sandbox_abs):
+                        # Auto-approve blackboard paths
+                        if self.blackboard_dir and part_abs.startswith(self.blackboard_dir):
+                            continue
                         is_safe = False
                         reason = f"Dangerous command targets outside sandbox: {part}"
                         break

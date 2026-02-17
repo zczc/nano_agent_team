@@ -304,7 +304,7 @@ class AgentEngine:
                         else:
                             args = {}
                             Logger.warning(f"Failed to repair JSON for tool '{fn_name}': {args_str}")
-                    
+
                     tool = next((t for t in current_tools if t.name == fn_name), None)
                     if tool:
                         try:
@@ -314,7 +314,26 @@ class AgentEngine:
                     else:
                         # Mock a tool result for non-existent tool to prevent crash
                         result = f"Error: Tool '{fn_name}' not found. Please check the tool name and try again."
-                    
+
+                    # Downgrade failed finish to wait — prevent engine from breaking on invalid finish
+                    if fn_name == "finish" and str(result).startswith("Error:"):
+                        error_detail = str(result)
+                        tc["function"]["name"] = "wait"
+                        tc["function"]["arguments"] = json.dumps({
+                            "duration": 0.1,
+                            "wait_for_new_index": False,
+                            "reason": f"Your finish call failed: {error_detail}. Please fix the arguments and call finish again."
+                        })
+                        wait_tool = next((t for t in current_tools if t.name == "wait"), None)
+                        if wait_tool:
+                            try:
+                                result = wait_tool.execute(duration=0.1, wait_for_new_index=False, reason=f"Your finish call failed: {error_detail}. Please fix the arguments and call finish again.")
+                            except Exception:
+                                result = f"[System] Your finish call failed: {error_detail}. Please fix the arguments and call finish again."
+                        else:
+                            result = f"[System] Your finish call failed: {error_detail}. Please fix the arguments and call finish again."
+                        fn_name = "wait"
+
                     return (tc, result, fn_name, args)
                 
                 # Execute tool calls (parallel or serial) with timeout protection
