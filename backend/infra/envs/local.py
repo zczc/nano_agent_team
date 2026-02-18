@@ -44,10 +44,16 @@ class LocalEnvironment(Environment):
         return self._workdir
 
     def _request_confirmation(self, message: str) -> bool:
-        """Helper to request confirmation via callback, IPC, or fallback to input"""
+        """Helper to request confirmation via callback, IPC, or fallback to input.
+
+        Priority:
+        1. confirmation_callback (TUI dialog or TAP stdio callback)
+        2. IPC RequestManager (non-interactive sub-agent mode)
+        3. CLI input() fallback (only for direct CLI usage without TUI)
+        """
         if self.confirmation_callback:
             return self.confirmation_callback(message)
-        
+
         if self.non_interactive and self.request_manager:
             # Create IPC Request
             print(f"[{self.agent_name}] Permission required. Sending request to Watchdog...")
@@ -57,11 +63,11 @@ class LocalEnvironment(Environment):
                 content=message,
                 reason="High-risk operation detected by LocalEnvironment"
             )
-            
+
             # Wait for response
             print(f"[{self.agent_name}] Waiting for approval (Req ID: {req_id})...")
             status = self.request_manager.wait_for_response(req_id, timeout=120)
-            
+
             if status == "APPROVED":
                 print(f"[{self.agent_name}] Request APPROVED.")
                 return True
@@ -72,9 +78,15 @@ class LocalEnvironment(Environment):
                 print(f"[{self.agent_name}] Request DENIED (Status: {status}).")
                 return False
 
-        # Fallback to CLI input
-        user_input = input(f"{message} [y/N]: ").strip().lower()
-        return user_input == 'y'
+        # Fallback to CLI input (only when no callback and not non-interactive)
+        # In TAP mode, confirmation_callback is always set, so this branch
+        # is only reached in direct CLI usage (e.g. main.py without TUI).
+        try:
+            user_input = input(f"{message} [y/N]: ").strip().lower()
+            return user_input == 'y'
+        except EOFError:
+            # stdin is closed (e.g. piped process) — deny by default
+            return False
 
     def run_command(self, command: str, cwd: Optional[str] = None, env_vars: Optional[Dict[str, str]] = None, timeout: int = 60, background: bool = False) -> str:
         target_cwd = cwd or self.workdir

@@ -62,6 +62,7 @@ class RequestMonitorMiddleware(StrategyMiddleware):
                         self.request_manager.update_request_status(req_id, "DENIED")
 
                 else:
+                    # CLI fallback (only in direct CLI mode without TUI/TAP)
                     print("\n" + "=" * 60)
                     print("🚨  PENDING PERMISSION REQUESTS DETECTED  🚨")
                     print("=" * 60 + "\n")
@@ -69,23 +70,28 @@ class RequestMonitorMiddleware(StrategyMiddleware):
                     print(f"  {message_body}")
                     print("-" * 40)
 
-                    while True:
-                        choice = input("  >> Approve this action? (y/n): ").strip().lower()
-                        if choice in ['y', 'yes']:
-                            if self.request_manager.update_request_status(req_id, "APPROVED"):
-                                print("  ✅ APPROVED.")
+                    try:
+                        while True:
+                            choice = input("  >> Approve this action? (y/n): ").strip().lower()
+                            if choice in ['y', 'yes']:
+                                if self.request_manager.update_request_status(req_id, "APPROVED"):
+                                    print("  ✅ APPROVED.")
+                                else:
+                                    print("  ❌ Update failed (File Lock Error?).")
+                                break
+                            elif choice in ['n', 'no']:
+                                if self.request_manager.update_request_status(req_id, "DENIED"):
+                                    print("  🚫 DENIED.")
+                                else:
+                                    print("  ❌ Update failed.")
+                                break
                             else:
-                                print("  ❌ Update failed (File Lock Error?).")
-                            break
-                        elif choice in ['n', 'no']:
-                            if self.request_manager.update_request_status(req_id, "DENIED"):
-                                print("  🚫 DENIED.")
-                            else:
-                                print("  ❌ Update failed.")
-                            break
-                        else:
-                            print("  Please enter 'y' or 'n'.")
-                    print("\n")
+                                print("  Please enter 'y' or 'n'.")
+                        print("\n")
+                    except EOFError:
+                        # stdin closed (piped process / TAP mode)
+                        Logger.warning("[RequestMonitor] stdin closed, auto-denying request")
+                        self.request_manager.update_request_status(req_id, "DENIED")
 
         except Exception as e:
             Logger.error(f"[RequestMonitor] Error checking requests: {e}")

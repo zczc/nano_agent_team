@@ -17,12 +17,16 @@
 
 import json
 import requests
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import List, Dict, Any, Optional, Type
 from abc import ABC, abstractmethod
 from backend.tools.base import BaseTool
 from backend.llm.decorators import schema_strict_validator, environment_guard, output_sanitizer
 from backend.infra.config import Config
 from backend.utils.logger import Logger
+
+# 外层硬超时（秒）：独立线程池等待上限，防止 primp native syscall 阻塞
+SEARCH_TIMEOUT = 15
 
 
 class SearchProvider(ABC):
@@ -54,22 +58,22 @@ class DuckDuckGoProvider(SearchProvider):
     def __init__(self):
         try:
             from ddgs import DDGS
-            
+
             self.ddgs = DDGS
             self.available = True
         except ImportError:
             self.available = False
             Logger.error("DuckDuckGo search (duckduckgo-search) not installed. Run 'pip install ddgs'.")
 
-
     def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """执行 DDG 文本搜索"""
+        """执行 DDG 文本搜索（每次创建新 DDGS 实例，避免 ClassVar executor 共享死锁）"""
         if not self.available:
             return [{"title": "Error", "body": "DuckDuckGo provider unavailable.", "href": "#"}]
         try:
-            with self.ddgs() as ddgs:
-                # results is an iterator of dicts
-                return [r for r in ddgs.text(query, max_results=max_results)]
+            # 不使用 context manager，避免 __exit__ 不清理 not_done futures 的问题
+            # timeout=8: 内部 HTTP 超时，比默认 5 宽松但不会太长
+            ddgs = self.ddgs(timeout=8)
+            return [r for r in ddgs.text(query, max_results=max_results)]
         except Exception as e:
             Logger.error(f"DuckDuckGo search error: {e}")
             return [{"title": "Error", "body": f"DDG Search failed: {str(e)}", "href": "#"}]
@@ -152,11 +156,30 @@ class SearchTool(BaseTool):
     def execute(self, query: str, max_results: int = 5) -> str:
         """
         执行搜索并返回 JSON 字符串结果
-        
+
+        使用独立单线程 ThreadPoolExecutor + 硬超时包裹 DDGS 调用，
+        防止 primp (Rust native) 阻塞导致整个 agent 卡死。
+
         装饰器说明：
             - @schema_strict_validator: 校验 query 和 max_results
-            - @output_sanitizer: 将结果列表转为 JSON 字符串并处理可能的超长输出
         """
-        results = self._provider.search(query, max_results)
+        try:
+            pool = ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(self._do_search, query, max_results)
+            try:
+                results = future.result(timeout=SEARCH_TIMEOUT)
+            except FuturesTimeoutError:
+                Logger.warning(f"web_search hard timeout ({SEARCH_TIMEOUT}s) for query: {query}")
+                results = [{"title": "Error", "body": f"Search timed out after {SEARCH_TIMEOUT}s. Try a simpler query or retry later.", "href": "#"}]
+            finally:
+                # cancel_futures=True 取消排队任务；wait=False 不等待卡死的线程
+                pool.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            Logger.error(f"web_search unexpected error: {e}")
+            results = [{"title": "Error", "body": f"Search failed: {str(e)}", "href": "#"}]
         return json.dumps(results, ensure_ascii=False)
+
+    def _do_search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+        """内部搜索方法，在独立线程中执行"""
+        return self._provider.search(query, max_results)
 

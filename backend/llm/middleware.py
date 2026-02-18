@@ -389,14 +389,199 @@ class InteractionRefinementMiddleware(StrategyMiddleware):
                     
         return next_call(session)
 
+class ContextOverflowMiddleware(StrategyMiddleware):
+    """
+    Context Overflow Middleware
+
+    Handles context_length_exceeded errors by using LLM to summarize and compress conversation history.
+    This is a reactive approach that triggers only when the error actually occurs.
+
+    Strategy:
+        1. Catch context_length_exceeded error
+        2. Use LLM to summarize history[:-2] (keep last 2 messages)
+        3. Replace compressed history with a summary message
+        4. Retry the LLM call
+
+    Fallback:
+        If LLM summarization fails, use intelligent truncation (keep recent messages up to ~10% of original length)
+    """
+
+    def __init__(self,
+                 max_retries: int = 2,
+                 summary_max_tokens: int = 5000,
+                 keep_last_n: int = 2):
+        """
+        Initialize Context Overflow Middleware
+
+        Args:
+            max_retries: Maximum retry attempts after compression (default 2)
+            summary_max_tokens: Maximum tokens for summary (default 5000)
+            keep_last_n: Number of recent messages to keep uncompressed (default 2)
+        """
+        self.max_retries = max_retries
+        self.summary_max_tokens = summary_max_tokens
+        self.keep_last_n = keep_last_n
+
+    def _is_context_length_error(self, error: Exception) -> bool:
+        """
+        Detect if error is context length exceeded error
+
+        Compatible with multiple model error formats:
+        - Anthropic: content_too_large
+        - OpenAI: maximum context length, context_length_exceeded
+        - Generic: too many tokens, token limit, etc.
+        """
+        error_msg = str(error).lower()
+        keywords = [
+            'context_length_exceeded',
+            'maximum context length',
+            'too many tokens',
+            'context window',
+            'token limit',
+            'request too large',
+            'content_too_large',
+            'max_tokens',
+            'input is too long',
+        ]
+        return any(k in error_msg for k in keywords)
+
+    def _build_summary_prompt(self, history: List[Dict]) -> str:
+        """Build prompt for LLM to summarize conversation history"""
+        history_text = json.dumps(history, ensure_ascii=False, indent=2)
+
+        prompt = f"""You are a conversation summarizer. Compress the following conversation history into a concise summary (max {self.summary_max_tokens} tokens).
+
+Focus on:
+- User's original goal/task
+- Key decisions made
+- Important tool results and findings
+- Current progress state
+
+Conversation history:
+{history_text}
+
+Provide a dense, factual summary:"""
+
+        return prompt
+
+    def _summarize_history(self, history: List[Dict], client, model: str) -> str:
+        """
+        Use LLM to summarize conversation history
+
+        Args:
+            history: History messages to summarize
+            client: LLM client (from engine)
+            model: Model name
+
+        Returns:
+            str: Compressed summary text
+        """
+        prompt = self._build_summary_prompt(history)
+
+        try:
+            # Call LLM (non-streaming)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a conversation summarizer."},
+                    {"role": "user", "content": prompt}
+                ],
+                stream=False,
+                max_tokens=self.summary_max_tokens
+            )
+
+            return response.choices[0].message.content
+        except Exception as e:
+            Logger.error(f"LLM summarization failed: {e}")
+            raise
+
+    def _intelligent_truncate(self, history: List[Dict]) -> List[Dict]:
+        """
+        Fallback: Intelligent truncation
+        Keep recent messages until total length reaches ~10% of original length
+        """
+        original_length = sum(len(str(msg.get("content", ""))) for msg in history)
+        target_length = max(original_length // 10, 1000)  # At least 1000 chars
+
+        accumulated_length = 0
+        truncated_history = []
+
+        for msg in reversed(history):
+            msg_length = len(str(msg.get("content", "")))
+            if accumulated_length + msg_length > target_length and truncated_history:
+                break
+            truncated_history.insert(0, msg)
+            accumulated_length += msg_length
+
+        return truncated_history
+
+    def __call__(self, session: AgentSession, next_call: Callable[[AgentSession], Any]) -> Any:
+        attempts = 0
+
+        while attempts <= self.max_retries:
+            try:
+                return next_call(session)
+            except Exception as e:
+                if not self._is_context_length_error(e):
+                    raise  # Not a context length error, re-raise
+
+                attempts += 1
+                if attempts > self.max_retries:
+                    Logger.error(f"Context overflow retry exhausted after {self.max_retries} attempts")
+                    raise
+
+                Logger.warning(f"Context length exceeded, attempting compression (attempt {attempts}/{self.max_retries})")
+
+                # Check if history is long enough to compress
+                if len(session.history) <= self.keep_last_n:
+                    Logger.error("History too short to compress")
+                    raise
+
+                # Get client and model from session metadata
+                client = session.metadata.get("llm_client")
+                model = session.metadata.get("llm_model")
+
+                # Compress history
+                to_summarize = session.history[:-self.keep_last_n]
+
+                if not client or not model:
+                    # Fallback: intelligent truncation
+                    Logger.warning("No client/model in session metadata, using intelligent truncation")
+                    session.history = self._intelligent_truncate(session.history)
+                    Logger.info(f"Truncated history to {len(session.history)} messages")
+                else:
+                    try:
+                        # Use LLM to summarize
+                        summary = self._summarize_history(to_summarize, client, model)
+
+                        # Replace history with summary + last N messages
+                        summary_message = {
+                            "role": "user",
+                            "content": f"[Context Summary] Previous conversation has been compressed:\n\n{summary}\n\n[End of Summary]"
+                        }
+                        session.history = [summary_message] + session.history[-self.keep_last_n:]
+
+                        Logger.info(f"Compressed {len(to_summarize)} messages into summary")
+                    except Exception as summary_error:
+                        # Fallback: intelligent truncation
+                        Logger.error(f"Summary failed: {summary_error}, using intelligent truncation")
+                        session.history = self._intelligent_truncate(session.history)
+                        Logger.info(f"Truncated history to {len(session.history)} messages")
+
+                # Retry with compressed history
+                continue
+
+        raise Exception("Context overflow handling failed")
+
+
 class ErrorRecoveryMiddleware(StrategyMiddleware):
     """
     Error Recovery Middleware
-    
+
     Handles exceptions during LLM calls (e.g., 400 Context Length Exceeded, 500 Server Error, Connection Error).
     Provides automatic retry and fallback strategies.
     """
-    
+
     def __init__(self, max_retries: int = 2, max_connection_retries: int = 5, backoff_factor: float = 1.0):
         self.max_retries = max_retries
         self.max_connection_retries = max_connection_retries

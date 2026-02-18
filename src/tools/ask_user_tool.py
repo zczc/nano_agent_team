@@ -41,13 +41,15 @@ class AskUserTool(BaseTool):
 
     @schema_strict_validator
     def execute(self, question: str, **kwargs) -> str:
+        # 1. Use callback if available (TAP stdio or TUI dialog)
         if self.input_callback:
             return self.input_callback(question)
-            
+
+        # 2. Fallback to CLI input (only in direct CLI mode without TUI/TAP)
         print(f"\n[AskUser] {question}")
         try:
-            # Use standard input to get response
             user_input = input("> ")
             return user_input.strip()
         except EOFError:
+            # stdin closed (piped process / TAP mode without callback)
             return ""

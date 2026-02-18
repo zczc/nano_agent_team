@@ -567,13 +567,12 @@ class AgentBridge:
             yield ChatMessage(role="assistant", content=f"Error: {str(e)}", is_error=True)
         finally:
             self._is_running = False
-            # Lifecycle: Set to IDLE (not DEAD) between messages.
-            # This keeps child agents alive while the TUI session is active.
-            # DEAD is only set via shutdown() when the session truly ends.
+            # Lifecycle: Mark as DEAD when swarm run completes.
+            # History lives in state.agent_messages (in-memory), not in registry,
+            # so this is safe. Child agents will detect parent DEAD and terminate,
+            # freeing resources. Next message will re-register as RUNNING.
             if self._swarm_agent:
-                self._swarm_agent.registry.update_agent(
-                    self._swarm_agent.name, status="IDLE"
-                )
+                self._swarm_agent.deregister()
     
     def stop(self):
         """Stop the current agent execution immediately (ctrl+K style)"""

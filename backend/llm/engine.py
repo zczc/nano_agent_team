@@ -34,11 +34,21 @@ from backend.utils.json_utils import repair_truncated_json
 from backend.llm.types import AgentSession, SystemPromptConfig
 from backend.llm.providers import LLMFactory
 from backend.infra.config import Config
-from backend.llm.middleware import StrategyMiddleware, LoopBreakerMiddleware, SemanticDriftGuard, ExecutionBudgetManager, ToolResultCacheMiddleware, ErrorRecoveryMiddleware
+from backend.llm.middleware import StrategyMiddleware, LoopBreakerMiddleware, SemanticDriftGuard, ExecutionBudgetManager, ToolResultCacheMiddleware, ErrorRecoveryMiddleware, ContextOverflowMiddleware
 from backend.tools.base import BaseTool
 from backend.utils.logger import Logger
 from backend.utils.langfuse_manager import observe
 from backend.llm.events import AgentEvent
+
+# IO 密集型工具：并行执行时串行化，避免共享线程池死锁
+_IO_BOUND_TOOLS = {"web_search", "web_reader", "browser_use"}
+
+# 按工具类型的超时（秒），未列出的工具使用 engine 默认 tool_timeout
+_TOOL_TIMEOUTS = {
+    "web_search": 30,
+    "web_reader": 45,
+    "browser_use": 60,
+}
 
 
 class AgentEngine:
@@ -83,8 +93,9 @@ class AgentEngine:
         self.client = LLMFactory.create_client(self.provider_key)
         self.model = LLMFactory.get_model_name(self.provider_key)
         self.strategies = strategies if strategies is not None else [
-            ErrorRecoveryMiddleware(),  # Error recovery at outermost layer
-            ToolResultCacheMiddleware(),
+            ContextOverflowMiddleware(),     # Outermost: catch context length errors, summarize and retry
+            ErrorRecoveryMiddleware(),       # Handle connection errors and other exceptions
+            ToolResultCacheMiddleware(),     # Preventive compression of tool results
             LoopBreakerMiddleware(),
             SemanticDriftGuard(),
             ExecutionBudgetManager()
@@ -107,9 +118,13 @@ class AgentEngine:
         Build LLM call pipeline (including middleware)
         """
         def base_llm_call(session: AgentSession):
+            # Inject client and model to metadata (for ContextOverflowMiddleware)
+            session.metadata["llm_client"] = self.client
+            session.metadata["llm_model"] = self.model
+
             model = self.model
             messages = [{"role": "system", "content": session.system_config.build()}] + session.history
-            
+
             if not self.client:
                 raise RuntimeError("LLM 客户端未初始化，请检查 keys.json 或环境变量中的 API Key，并确认 openai 依赖已安装。")
 
@@ -120,7 +135,7 @@ class AgentEngine:
             }
             if session.tools:
                 kwargs["tools"] = [t.to_openai_schema() for t in session.tools]
-                
+
             return self.client.chat.completions.create(**kwargs)
 
         pipeline = base_llm_call
@@ -128,7 +143,7 @@ class AgentEngine:
             def make_wrapper(current_pipeline, current_strat):
                 return lambda s: current_strat(s, current_pipeline)
             pipeline = make_wrapper(pipeline, strategy)
-        
+
         return pipeline
         
     @observe(as_type="span")
@@ -336,33 +351,58 @@ class AgentEngine:
 
                     return (tc, result, fn_name, args)
                 
-                # Execute tool calls (parallel or serial) with timeout protection
+                # Execute tool calls with timeout protection
+                # IO-bound tools (web_search etc.) are serialized to avoid shared thread pool deadlock;
+                # local tools run in parallel as before.
                 if self.parallel_tools and len(tool_calls) > 1:
-                    # Parallel execution, limit max workers
-                    max_workers = min(len(tool_calls), self.max_parallel_workers)
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        futures = [executor.submit(execute_single_tool, tc) for tc in tool_calls]
-                        tool_results = []
-                        for i, f in enumerate(futures):
-                            try:
-                                tool_results.append(f.result(timeout=self.tool_timeout))
-                            except FuturesTimeoutError:
-                                fn_name = tool_calls[i]["function"]["name"]
-                                error_result = f"Error: Tool '{fn_name}' execution timed out after {self.tool_timeout}s."
-                                tool_results.append((tool_calls[i], error_result, fn_name, {}))
+                    # Split into IO-bound and local tool calls
+                    io_tool_calls = [tc for tc in tool_calls if tc["function"]["name"] in _IO_BOUND_TOOLS]
+                    local_tool_calls = [tc for tc in tool_calls if tc["function"]["name"] not in _IO_BOUND_TOOLS]
+
+                    tool_results = []
+
+                    # 1) Local tools: parallel execution
+                    if local_tool_calls:
+                        max_workers = min(len(local_tool_calls), self.max_parallel_workers)
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            futures = [(tc, executor.submit(execute_single_tool, tc)) for tc in local_tool_calls]
+                            for tc, f in futures:
+                                fn_name = tc["function"]["name"]
+                                timeout = _TOOL_TIMEOUTS.get(fn_name, self.tool_timeout)
+                                try:
+                                    tool_results.append(f.result(timeout=timeout))
+                                except FuturesTimeoutError:
+                                    error_result = f"Error: Tool '{fn_name}' execution timed out after {timeout}s."
+                                    tool_results.append((tc, error_result, fn_name, {}))
+
+                    # 2) IO tools: serial execution (avoid DDGS ClassVar executor contention)
+                    for tc in io_tool_calls:
+                        fn_name = tc["function"]["name"]
+                        timeout = _TOOL_TIMEOUTS.get(fn_name, self.tool_timeout)
+                        executor = ThreadPoolExecutor(max_workers=1)
+                        future = executor.submit(execute_single_tool, tc)
+                        try:
+                            tool_results.append(future.result(timeout=timeout))
+                        except FuturesTimeoutError:
+                            error_result = f"Error: Tool '{fn_name}' execution timed out after {timeout}s."
+                            tool_results.append((tc, error_result, fn_name, {}))
+                        finally:
+                            executor.shutdown(wait=False, cancel_futures=True)
                 else:
-                    # Serial execution with timeout
+                    # Serial execution with per-tool timeout
                     tool_results = []
                     for tc in tool_calls:
-                        with ThreadPoolExecutor(max_workers=1) as executor:
-                            future = executor.submit(execute_single_tool, tc)
-                            try:
-                                tool_results.append(future.result(timeout=self.tool_timeout))
-                            except FuturesTimeoutError:
-                                fn_name = tc["function"]["name"]
-                                error_result = f"Error: Tool '{fn_name}' execution timed out after {self.tool_timeout}s."
-                                tool_results.append((tc, error_result, fn_name, {}))
-                
+                        fn_name = tc["function"]["name"]
+                        timeout = _TOOL_TIMEOUTS.get(fn_name, self.tool_timeout)
+                        executor = ThreadPoolExecutor(max_workers=1)
+                        future = executor.submit(execute_single_tool, tc)
+                        try:
+                            tool_results.append(future.result(timeout=timeout))
+                        except FuturesTimeoutError:
+                            error_result = f"Error: Tool '{fn_name}' execution timed out after {timeout}s."
+                            tool_results.append((tc, error_result, fn_name, {}))
+                        finally:
+                            executor.shutdown(wait=False, cancel_futures=True)                
                 # Process results in order
                 for tc, result, fn_name, args in tool_results:
                     # Handle special logic for web_search
