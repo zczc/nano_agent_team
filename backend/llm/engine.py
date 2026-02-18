@@ -252,22 +252,36 @@ class AgentEngine:
         try:
             for iteration in range(max_iterations):
                 session.metadata["iteration_count"] = iteration + 1
-                stream = pipeline(session)
+
+                # Stream consumption with retry — streaming errors (e.g. read timeout)
+                # happen during iteration, outside middleware scope. Retry here and
+                # re-invoke pipeline (which passes through the full middleware chain).
                 full_content = ""
                 tool_calls = []
-                for chunk in stream:
-                    delta = chunk.choices[0].delta
-                    if delta.tool_calls:
-                        for tc_chunk in delta.tool_calls:
-                            if len(tool_calls) <= tc_chunk.index:
-                                tool_calls.append({"id": tc_chunk.id, "function": {"name": "", "arguments": ""}})
-                            tc = tool_calls[tc_chunk.index]
-                            if tc_chunk.id: tc["id"] = tc_chunk.id
-                            if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
-                            if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
-                    if delta.content:
-                        full_content += delta.content
-                        yield AgentEvent(type="token", data={"delta": delta.content})
+                for stream_attempt in range(3):  # max 3 attempts (1 initial + 2 retries)
+                    try:
+                        stream = pipeline(session)
+                        full_content = ""
+                        tool_calls = []
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta
+                            if delta.tool_calls:
+                                for tc_chunk in delta.tool_calls:
+                                    if len(tool_calls) <= tc_chunk.index:
+                                        tool_calls.append({"id": tc_chunk.id, "function": {"name": "", "arguments": ""}})
+                                    tc = tool_calls[tc_chunk.index]
+                                    if tc_chunk.id: tc["id"] = tc_chunk.id
+                                    if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
+                                    if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+                            if delta.content:
+                                full_content += delta.content
+                                yield AgentEvent(type="token", data={"delta": delta.content})
+                        break  # stream consumed successfully
+                    except Exception as e:
+                        if stream_attempt < 2:
+                            Logger.warning(f"Stream error: {e}. Retrying ({stream_attempt + 1}/2)...")
+                            continue
+                        raise  # exhausted retries, let outer except handle
                 
                 if not tool_calls:
                     if search_citations:
