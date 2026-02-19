@@ -1,110 +1,170 @@
 """
 网页搜索工具模块
 
-本模块实现了统一的网页搜索接口，支持通过不同的搜索供应商（如 DuckDuckGo）检索互联网信息。
-搜索结果包含标题、内容摘要和链接。
+支持两个搜索供应商：
+    - ExaProvider: 通过 Exa MCP 公开端点搜索，免费无需 API Key（默认）
+    - DuckDuckGoProvider: 基于 duckduckgo-search 库的免费搜索（备选）
 
-主要类：
-    - SearchProvider: 搜索供应商抽象基类
-    - DuckDuckGoProvider: 基于 duckduckgo-search 库的免费搜索实现
-    - SearchTool: 统一的搜索工具类，实现了 BaseTool 接口
-
-设计理念：
-    - 供应商抽象：通过 SearchProvider 接口，未来可以轻松集成 Google, Bing 或 Serper 等付费 API。
-    - 容错性：如果选定的供应商初始化失败，会自动记录日志并提示错误。
-    - 动态配置：支持通过 `configure` 方法在运行时切换搜索供应商。
+SearchTool 默认使用 Exa，失败时自动 fallback 到 DuckDuckGo。
 """
 
 import json
 import requests
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from typing import List, Dict, Any, Optional, Type
+from typing import List, Dict, Any, Optional
 from abc import ABC, abstractmethod
 from backend.tools.base import BaseTool
-from backend.llm.decorators import schema_strict_validator, environment_guard, output_sanitizer
+from backend.llm.decorators import schema_strict_validator
 from backend.infra.config import Config
 from backend.utils.logger import Logger
 
-# 外层硬超时（秒）：独立线程池等待上限，防止 primp native syscall 阻塞
+# 外层硬超时（秒）
 SEARCH_TIMEOUT = 15
 
 
 class SearchProvider(ABC):
-    """
-    搜索引擎供应商抽象基类
-    定义了统一的 search 接口。
-    """
+    """搜索引擎供应商抽象基类"""
     @abstractmethod
     def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """
-        执行搜索
-        
-        Args:
-            query: 搜索关键词
-            max_results: 返回的最大结果数量
-            
-        Returns:
-            List[Dict]: 搜索结果列表，每个字典包含 'title', 'body', 'href' 等字段
-        """
         pass
 
 
+class ExaProvider(SearchProvider):
+    """Exa MCP 搜索供应商 — 免费公开端点，无需 API Key。"""
+
+    MCP_URL = "https://mcp.exa.ai/mcp"
+
+    def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "web_search_exa",
+                "arguments": {
+                    "query": query,
+                    "type": "auto",
+                    "numResults": max_results,
+                    "livecrawl": "fallback",
+                },
+            },
+        }
+        try:
+            resp = requests.post(
+                self.MCP_URL,
+                json=payload,
+                headers={
+                    "accept": "application/json, text/event-stream",
+                    "content-type": "application/json",
+                },
+                timeout=25,
+            )
+            resp.raise_for_status()
+
+            # Exa 返回 SSE 格式：每行 "data: {json}"
+            results = []
+            for line in resp.text.splitlines():
+                if not line.startswith("data: "):
+                    continue
+                data = json.loads(line[6:])
+                content_list = (
+                    data.get("result", {}).get("content", [])
+                )
+                if not content_list:
+                    continue
+                text = content_list[0].get("text", "")
+                results = self._parse_exa_text(text)
+                break
+
+            if not results:
+                return [{"title": "No results", "body": "Exa returned no results.", "href": "#"}]
+            return results[:max_results]
+
+        except Exception as e:
+            Logger.error(f"Exa search error: {e}")
+            raise  # 让上层 fallback
+
+    @staticmethod
+    def _parse_exa_text(text: str) -> List[Dict[str, Any]]:
+        """将 Exa 返回的文本解析为统一的结果列表。
+
+        Exa MCP 返回的 text 通常是 markdown 格式的搜索结果，
+        每条包含 Title / URL / Content 等信息。
+        """
+        results = []
+        current: Dict[str, Any] = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("Title:"):
+                if current.get("title"):
+                    results.append(current)
+                current = {"title": line[6:].strip(), "body": "", "href": "#"}
+            elif line.startswith("URL:"):
+                current["href"] = line[4:].strip()
+            elif line.startswith("Content:"):
+                current["body"] = line[8:].strip()
+            elif current and line and not line.startswith("---"):
+                # 追加到 body
+                if current.get("body"):
+                    current["body"] += " " + line
+                else:
+                    current["body"] = line
+        if current.get("title"):
+            results.append(current)
+
+        # 如果解析不出结构化结果，把整段文本作为单条返回
+        if not results and text.strip():
+            results.append({"title": "Search Results", "body": text[:3000], "href": "#"})
+        return results
+
+
 class DuckDuckGoProvider(SearchProvider):
-    """
-    DuckDuckGo 搜索供应商
-    
-    使用开源的 `duckduckgo-search` (ddgs) 库进行搜索，无需 API Key。
-    """
+    """DuckDuckGo 搜索供应商 — 基于 ddgs 库，无需 API Key。"""
+
     def __init__(self):
         try:
             from ddgs import DDGS
-
             self.ddgs = DDGS
             self.available = True
         except ImportError:
             self.available = False
-            Logger.error("DuckDuckGo search (duckduckgo-search) not installed. Run 'pip install ddgs'.")
+            Logger.error("duckduckgo-search not installed. Run 'pip install ddgs'.")
 
     def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """执行 DDG 文本搜索（每次创建新 DDGS 实例，避免 ClassVar executor 共享死锁）"""
         if not self.available:
             return [{"title": "Error", "body": "DuckDuckGo provider unavailable.", "href": "#"}]
         try:
-            # 不使用 context manager，避免 __exit__ 不清理 not_done futures 的问题
-            # timeout=8: 内部 HTTP 超时，比默认 5 宽松但不会太长
             ddgs = self.ddgs(timeout=8)
             return [r for r in ddgs.text(query, max_results=max_results)]
         except Exception as e:
             Logger.error(f"DuckDuckGo search error: {e}")
             return [{"title": "Error", "body": f"DDG Search failed: {str(e)}", "href": "#"}]
 
-
 class SearchTool(BaseTool):
-    """
-    统一网页搜索工具
-    
-    Agent 通过此工具访问互联网。支持在初始化或运行时选择不同的搜索供应商。
-    默认供应商由 Config.SEARCH_PROVIDER 定义。
-    """
+    """统一网页搜索工具 — 默认 Exa，失败自动 fallback 到 DuckDuckGo。"""
+
     def __init__(self, provider_name: Optional[str] = None):
-        """
-        初始化搜索工具
-        
-        Args:
-            provider_name: 供应商名称（如 "duckduckgo"），默认为配置中的默认值
-        """
         self._provider_name = provider_name or Config.SEARCH_PROVIDER
         self._provider = self._create_provider(self._provider_name)
+        self._fallback: Optional[SearchProvider] = None
 
     def _create_provider(self, name: str) -> SearchProvider:
-        """工厂方法：根据名称创建供应商实例"""
         name = name.lower()
+        if name == "exa":
+            return ExaProvider()
         if name == "duckduckgo":
             return DuckDuckGoProvider()
-        
-        # 默认回退到 DuckDuckGo
-        Logger.warning(f"Unknown search provider '{name}', falling back to DuckDuckGo.")
-        return DuckDuckGoProvider()
+        Logger.warning(f"Unknown search provider '{name}', using Exa.")
+        return ExaProvider()
+
+    def _get_fallback(self) -> SearchProvider:
+        if self._fallback is None:
+            # Exa 主 → DDG 备；DDG 主 → Exa 备
+            if isinstance(self._provider, ExaProvider):
+                self._fallback = DuckDuckGoProvider()
+            else:
+                self._fallback = ExaProvider()
+        return self._fallback
 
     @property
     def name(self) -> str:
@@ -112,74 +172,73 @@ class SearchTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return f"Search the internet for up-to-date information, news, or facts using {self._provider_name}."
+        return (
+            "Search the internet for up-to-date information, news, or facts. "
+            "Returns a list of results with title, body, and URL."
+        )
 
     @property
     def parameters_schema(self) -> Dict[str, Any]:
-        """定义工具参数：query (必填), max_results (可选)"""
         return {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query."
+                    "description": "The search query.",
                 },
                 "max_results": {
                     "type": "integer",
                     "description": "Number of results to return (default 5).",
                     "minimum": 1,
                     "maximum": 10,
-                    "default": 5
-                }
+                    "default": 5,
+                },
             },
-            "required": ["query"]
+            "required": ["query"],
         }
 
     def configure(self, context: Dict[str, Any]):
-        """
-        动态配置搜索供应商
-        
-        Args:
-            context: 包含 'search_provider' 键的配置字典
-        """
         new_provider = context.get("search_provider")
         if new_provider and new_provider != self._provider_name:
             self._provider_name = new_provider
             self._provider = self._create_provider(new_provider)
+            self._fallback = None
 
     def get_status_message(self, **kwargs) -> str:
-        query = kwargs.get('query', '')
-        return f"\n\n🔍 正在通过 {self._provider_name} 搜索: {query}...\n"
+        query = kwargs.get("query", "")
+        return f"\n\n🔍 Searching via {self._provider_name}: {query}...\n"
 
     @schema_strict_validator
-    # @output_sanitizer(max_length=4000)
     def execute(self, query: str, max_results: int = 5) -> str:
-        """
-        执行搜索并返回 JSON 字符串结果
-
-        使用独立单线程 ThreadPoolExecutor + 硬超时包裹 DDGS 调用，
-        防止 primp (Rust native) 阻塞导致整个 agent 卡死。
-
-        装饰器说明：
-            - @schema_strict_validator: 校验 query 和 max_results
-        """
+        """执行搜索，主供应商失败时自动 fallback。"""
         try:
             pool = ThreadPoolExecutor(max_workers=1)
             future = pool.submit(self._do_search, query, max_results)
             try:
                 results = future.result(timeout=SEARCH_TIMEOUT)
             except FuturesTimeoutError:
-                Logger.warning(f"web_search hard timeout ({SEARCH_TIMEOUT}s) for query: {query}")
-                results = [{"title": "Error", "body": f"Search timed out after {SEARCH_TIMEOUT}s. Try a simpler query or retry later.", "href": "#"}]
+                Logger.warning(f"web_search timeout ({SEARCH_TIMEOUT}s): {query}")
+                results = [{"title": "Error",
+                            "body": f"Search timed out after {SEARCH_TIMEOUT}s.",
+                            "href": "#"}]
             finally:
-                # cancel_futures=True 取消排队任务；wait=False 不等待卡死的线程
                 pool.shutdown(wait=False, cancel_futures=True)
         except Exception as e:
             Logger.error(f"web_search unexpected error: {e}")
-            results = [{"title": "Error", "body": f"Search failed: {str(e)}", "href": "#"}]
+            results = [{"title": "Error",
+                        "body": f"Search failed: {str(e)}", "href": "#"}]
         return json.dumps(results, ensure_ascii=False)
 
     def _do_search(self, query: str, max_results: int) -> List[Dict[str, Any]]:
-        """内部搜索方法，在独立线程中执行"""
-        return self._provider.search(query, max_results)
-
+        """主供应商搜索，异常时 fallback。"""
+        try:
+            return self._provider.search(query, max_results)
+        except Exception as e:
+            Logger.warning(f"{self._provider_name} failed ({e}), falling back...")
+            try:
+                return self._get_fallback().search(query, max_results)
+            except Exception as e2:
+                Logger.error(f"Fallback search also failed: {e2}")
+                return [{"title": "Error",
+                         "body": f"All search providers failed. Primary: {e}, Fallback: {e2}",
+                         "href": "#"}]

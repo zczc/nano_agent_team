@@ -136,6 +136,17 @@ class BrowserUseTool(BaseTool):
                     return key
             except Exception as e:
                 Logger.debug(f"[BrowserUseTool] Injected callback failed: {e}")
+
+        # Fallback: read active model directly from Config
+        # (covers the case when instantiated via ToolRegistry without callback)
+        try:
+            if Config.ACTIVE_PROVIDER and Config.ACTIVE_MODEL:
+                key = f"{Config.ACTIVE_PROVIDER}/{Config.ACTIVE_MODEL}"
+                Logger.info(f"[BrowserUseTool] Using model from Config fallback: {key}")
+                return key
+        except Exception as e:
+            Logger.debug(f"[BrowserUseTool] Config fallback failed: {e}")
+
         return None
 
     @staticmethod

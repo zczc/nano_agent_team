@@ -1,37 +1,174 @@
 """
 网页内容读取工具模块
 
-本模块实现了基于 Jina Reader API 的网页内容提取工具。
-它可以将网页 HTML 转换为干净的 Markdown 文本，方便 LLM 进一步分析。
+新实现：原生 HTTP fetch + markdownify 转换，不依赖外部 API。
+旧实现（JinaWebReaderTool）保留在文件底部作为 backup。
 
 主要类：
-    - WebReaderTool: 实现 BaseTool 接口的网页读取工具。
-
-设计理念：
-    - 外部服务集成：使用 Jina Reader (r.jina.ai) 提供的强大 Markdown 转换能力。
-    - 安全性：校验 URL 格式。
-    - 容错性：处理网络请求异常并返回清晰的错误提示。
+    - WebReaderTool: 原生 fetch + HTML→Markdown 转换（默认）
+    - JinaWebReaderTool: 基于 Jina Reader API 的旧实现（backup）
 """
 
+import re
 import requests
 from typing import Dict, Any
-from backend.infra.config import Config
 from backend.tools.base import BaseTool
-from backend.llm.decorators import schema_strict_validator, environment_guard, output_sanitizer
+from backend.llm.decorators import schema_strict_validator
+from backend.infra.config import Config
+from backend.utils.logger import Logger
+
+MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # 5MB
+DEFAULT_TIMEOUT = 30
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/143.0.0.0 Safari/537.36"
+)
+
+
+def _html_to_markdown(html: str) -> str:
+    """HTML → Markdown，去除 script/style 等噪音标签。"""
+    from bs4 import BeautifulSoup
+    import markdownify
+
+    soup = BeautifulSoup(html, "html.parser")
+    # 移除噪音标签
+    for tag in soup.find_all(["script", "style", "noscript", "iframe",
+                              "object", "embed", "meta", "link"]):
+        tag.decompose()
+    cleaned = str(soup)
+    md = markdownify.markdownify(
+        cleaned,
+        heading_style="ATX",
+        bullets="-",
+        code_language="",
+        strip=["img"],
+    )
+    # 压缩连续空行
+    md = re.sub(r'\n{3,}', '\n\n', md)
+    return md.strip()
+
+
+def _extract_text(html: str) -> str:
+    """HTML → 纯文本。"""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all(["script", "style", "noscript", "iframe"]):
+        tag.decompose()
+    return soup.get_text(separator="\n", strip=True)
 
 
 class WebReaderTool(BaseTool):
+    """网页内容读取工具 — 原生 HTTP fetch + HTML→Markdown 转换。
+
+    参考 opencode webfetch 实现：
+    - 直接 requests.get 抓取页面
+    - 用 markdownify 将 HTML 转为 Markdown
+    - 支持 markdown / text / html 三种输出格式
+    - Cloudflare 403 自动重试（换 UA）
+    - 5MB 大小限制，30s 超时
     """
-    网页内容读取工具
-    
-    调用 Jina Reader API 将指定 URL 的网页内容转化为 Markdown 格式。
+
+    @property
+    def name(self) -> str:
+        return "web_reader"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Fetch a web page and return its content as clean markdown (default), "
+            "plain text, or raw HTML. Max 5MB, 30s timeout."
+        )
+
+    @property
+    def parameters_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL of the web page to read.",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["markdown", "text", "html"],
+                    "description": "Output format: markdown (default), text, or html.",
+                    "default": "markdown",
+                },
+            },
+            "required": ["url"],
+        }
+
+    def get_status_message(self, **kwargs) -> str:
+        url = kwargs.get("url", "")
+        return f"\n\n📖 Reading: {url[:60]}...\n"
+
+    @schema_strict_validator
+    def execute(self, url: str, format: str = "markdown") -> str:
+        if not url.startswith("http"):
+            return "Error: URL must start with http:// or https://"
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=DEFAULT_TIMEOUT,
+                                stream=True, allow_redirects=True)
+
+            # Cloudflare bot detection — retry with honest UA
+            if resp.status_code == 403:
+                cf = resp.headers.get("cf-mitigated", "")
+                if "challenge" in cf.lower():
+                    Logger.info("Cloudflare challenge detected, retrying with plain UA")
+                    headers["User-Agent"] = "nano-agent-team/web_reader"
+                    resp = requests.get(url, headers=headers, timeout=DEFAULT_TIMEOUT,
+                                        stream=True, allow_redirects=True)
+
+            resp.raise_for_status()
+
+            # 检查大小
+            cl = resp.headers.get("content-length")
+            if cl and int(cl) > MAX_RESPONSE_SIZE:
+                return f"Error: Response too large ({cl} bytes, limit {MAX_RESPONSE_SIZE})"
+
+            content = resp.text
+            if len(content.encode("utf-8", errors="ignore")) > MAX_RESPONSE_SIZE:
+                return "Error: Response body exceeds 5MB limit"
+
+            content_type = resp.headers.get("content-type", "")
+            is_html = "text/html" in content_type or "xhtml" in content_type
+
+            if format == "html":
+                return content
+            elif format == "text":
+                return _extract_text(content) if is_html else content
+            else:  # markdown (default)
+                return _html_to_markdown(content) if is_html else content
+
+        except requests.exceptions.Timeout:
+            return f"Error: Request timed out after {DEFAULT_TIMEOUT}s"
+        except requests.exceptions.HTTPError as e:
+            return f"Error: HTTP {e.response.status_code if e.response else '?'} - {e}"
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
+# BACKUP: JinaWebReaderTool — 旧的 Jina Reader API 实现
+# 保留供需要时切换回来使用。如需启用，将 import 处的 WebReaderTool 替换为此类。
+# ---------------------------------------------------------------------------
+
+class JinaWebReaderTool(BaseTool):
+    """[BACKUP] 基于 Jina Reader API (r.jina.ai) 的网页读取工具。
+
+    需要 Config.JINA_READER_KEY，无 key 时以匿名模式运行（有速率限制）。
     """
+
     def __init__(self):
-        """
-        初始化读取工具
-        
-        从配置中读取 JINA_READER_KEY。如果未提供 Key，API 可能以匿名模式运行（有速率限制）。
-        """
         self.api_key = Config.JINA_READER_KEY
         self.base_url = "https://r.jina.ai/"
 
@@ -42,46 +179,33 @@ class WebReaderTool(BaseTool):
     @property
     def description(self) -> str:
         return "Read the content of a specific web page and return its markdown content."
-   
+
     @property
     def parameters_schema(self) -> Dict[str, Any]:
-        """定义工具参数：url (必填)"""
         return {
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
-                    "description": "The URL of the web page to read."
-                }
+                    "description": "The URL of the web page to read.",
+                },
             },
-            "required": ["url"]
+            "required": ["url"],
         }
-  
+
     def get_status_message(self, **kwargs) -> str:
         url = kwargs.get("url", "")
-        # 只显示 URL 的前 50 个字符
         return f"\n\n📖 正在读取网页: {url[:50]}...\n"
-  
+
     @schema_strict_validator
-    # @output_sanitizer(max_length=8000)
     def execute(self, url: str) -> str:
-        """
-        执行网页读取
-        
-        Args:
-            url: 目标网页的完整 URL
-            
-        Returns:
-            str: 网页内容的 Markdown 字符串，或错误信息
-        """
         if not url.startswith("http"):
             return "Error: Invalid URL. URL must start with http or https."
-            
+
         target_url = f"{self.base_url}{url}"
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        
+
         try:
-            # 执行 GET 请求，超时时间设为 30 秒
             response = requests.get(target_url, headers=headers, timeout=30)
             response.raise_for_status()
             return response.text
@@ -89,4 +213,3 @@ class WebReaderTool(BaseTool):
             return f"Error: HTTP {response.status_code} - {str(e)}"
         except Exception as e:
             return f"Error: {str(e)}"
-

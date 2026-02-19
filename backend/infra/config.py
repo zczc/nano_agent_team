@@ -50,7 +50,7 @@ class Config:
     # Default Provider and Model (loaded from tui_state.json)
     ACTIVE_PROVIDER = None
     ACTIVE_MODEL = None
-    SEARCH_PROVIDER = "duckduckgo"
+    SEARCH_PROVIDER = "exa"
     JINA_READER_KEY = ""
 
     @classmethod
@@ -69,7 +69,7 @@ class Config:
             cls.LANGFUSE_HOST = lf_config.get('host', cls.LANGFUSE_HOST)
             
             # Search
-            cls.SEARCH_PROVIDER = cls._data.get('search', {}).get('provider', 'duckduckgo')
+            cls.SEARCH_PROVIDER = cls._data.get('search', {}).get('provider', 'exa')
             
             # Jina Reader
             jina_config = cls._external_services.get('jina', {})
