@@ -37,6 +37,21 @@ class FinishTool(BaseTool):
 
     @schema_strict_validator
     def execute(self, output: str, reason: str = None) -> str:
+        # Guard: block finish if an evolution workspace worktree still exists.
+        # This forces the Watchdog to call evolution_workspace() first.
+        import os
+        from backend.infra.config import Config
+        workspace = os.path.join(Config.BLACKBOARD_ROOT, "resources", "workspace")
+        if os.path.isfile(os.path.join(workspace, ".git")):
+            return (
+                "BLOCKED: Evolution workspace worktree still exists.\n\n"
+                f"  {workspace}\n\n"
+                "You MUST call the 'evolution_workspace' tool first:\n"
+                "  - PASS: evolution_workspace(verdict='PASS', round_num=N, description='...', changed_files=[...])\n"
+                "  - FAIL: evolution_workspace(verdict='FAIL', round_num=N)\n\n"
+                "Do NOT call finish until the worktree is removed."
+            )
+
         # In the AgentEngine loop, this will be detected to break the loop.
         reason_str = f"Reason: {reason}\n\n" if reason else ""
         return f"Agent Finished.\n\n{reason_str}===========================\n\nOutput: {output}"

@@ -16,6 +16,7 @@ from backend.tools.read_file import ReadFileTool
 from backend.tools.edit_file import EditFileTool
 from backend.tools.grep import GrepTool
 from backend.tools.glob import GlobTool
+from backend.tools.evolution_workspace import EvolutionWorkspaceTool
 
 # Ensure project root is in path
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -194,6 +195,11 @@ def main():
         watchdog.add_tool(EditFileTool(env=env))
         watchdog.add_tool(GrepTool())
         watchdog.add_tool(GlobTool())
+
+        # Evolution mode: add workspace commit/cleanup tool
+        # finish_tool will BLOCK if this hasn't been called first
+        if args.evolution:
+            watchdog.add_tool(EvolutionWorkspaceTool())
         
         print(f"\n[Launcher] Starting {args.name} ({args.role})")
         print(f"[Launcher] Mission: {mission}\n")

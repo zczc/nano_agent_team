@@ -144,58 +144,46 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 
 > **BRANCH POLICY**: Each round's branch is KEPT as a permanent record. NEVER merge into main. NEVER delete the branch. The branch IS the deliverable.
 
-1. Read Tester's result_summary from central_plan.md
-2. **PASS** (Tester says VERDICT: PASS):
+1. Read Tester's result_summary from central_plan.md.
 
-   > ⚠️ **MANDATORY GIT STEPS — do NOT skip, do NOT jump to writing the report first.**
-   > The workspace IS the git branch. Commit there, then remove the worktree.
+2. **Call `evolution_workspace` tool — this is the FIRST action after reading the verdict.**
+   This tool commits (PASS) or discards (FAIL) the workspace and removes the worktree.
+   `finish` will be BLOCKED until this tool is called.
 
-   a. `bash` → stage changed files in the worktree (list explicitly from Developer's CHANGED_FILES):
-      ```bash
-      git -C {{blackboard}}/resources/workspace add <file1> <file2> ...
-      ```
-   b. `bash` → commit in the worktree:
-      ```bash
-      git -C {{blackboard}}/resources/workspace commit -m "evolution(round-{N}): [description]"
-      ```
-   c. `bash` → remove the worktree (now clean after commit):
-      ```bash
-      git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace
-      ```
-   d. The branch `evolution/round-{N}` remains as a permanent record (with the commit).
-   e. Main worktree branch unchanged — no `git checkout` needed.
-
-   Only AFTER completing steps a–c, proceed to step 3 (write report).
-
-3. **FAIL** (Tester says VERDICT: FAIL or any error):
-   - `bash` → force-remove the worktree (discards uncommitted workspace changes):
-     ```bash
-     git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace --force
+   - **PASS**:
      ```
-   - The branch `evolution/round-{N}` is KEPT (pointing to HEAD, no new commit) for post-mortem
-   - Main worktree branch unchanged — no `git checkout` needed
-   - Record failure reason
-4. Write evolution report:
+     evolution_workspace(
+       verdict="PASS",
+       round_num=N,
+       description="short description of what was implemented",
+       changed_files=["backend/tools/foo.py", "tests/test_foo.py", ...]
+     )
+     ```
+   - **FAIL**:
+     ```
+     evolution_workspace(verdict="FAIL", round_num=N)
+     ```
+
+3. Write evolution report:
    `write_file` → `{{root_path}}/evolution_reports/round_{NNN}_{timestamp}.md`
    Include: direction, research, changes, test results, verdict, branch name
-5. Update evolution state — **use `current_round` (N) as the round number**:
+
+4. Update evolution state — **use `current_round` (N) as the round number**:
    `read_file` → `{{root_path}}/evolution_state.json`
    `write_file` → set `"round": N`, add new entry to `"history"` list (include branch name), keep existing entries
-6. Update central_plan.md mission status to DONE, then call `finish` to exit
+
+5. Update central_plan.md mission status to DONE, then call `finish` to exit.
 
 ### Phase 3.5: Recovery Protocol
 If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
-1. `bash` → force-remove the worktree:
-   ```bash
-   git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace --force
-   ```
-   (If worktree was never created, skip this step — it will error harmlessly.)
-2. Main worktree branch is unchanged throughout — no `git checkout` needed
-3. The failed branch `evolution/round-{N}` is KEPT for post-mortem
-4. Record failure in evolution_state.json: set `"round": N` (current_round), add FAIL entry to history
-5. Write failure report to evolution_reports/
-6. Update central_plan.md mission status to DONE
-7. Call `finish` — the next round starts fresh
+1. Call `evolution_workspace(verdict="FAIL", round_num=N)` to discard the workspace.
+   (If worktree was never created, the tool will return harmlessly.)
+2. Main worktree branch is unchanged throughout — no `git checkout` needed.
+3. The failed branch `evolution/round-{N}` is KEPT for post-mortem.
+4. Record failure in evolution_state.json: set `"round": N` (current_round), add FAIL entry to history.
+5. Write failure report to evolution_reports/.
+6. Update central_plan.md mission status to DONE.
+7. Call `finish` — the next round starts fresh.
 
 ## Supervision & Agent Monitoring
 
@@ -335,7 +323,6 @@ Protocol:
 2. **All Tasks Done**: All subtasks are in `DONE` status.
 3. **Report Written**: Evolution report has been saved to `evolution_reports/`.
 4. **State Updated**: `evolution_state.json` has been updated with this round's result.
-5. **Worktree Cleaned Up**:
-   - PASS: `git -C {{blackboard}}/resources/workspace commit` was run AND `git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace` was run.
-   - FAIL: `git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace --force` was run.
-   - Verify: `git -C {{root_path}} worktree list` should show only ONE worktree (the main one). If the workspace still appears, you have NOT completed this step.
+5. **`evolution_workspace` called**: The workspace tool was called with PASS or FAIL verdict.
+   Note: `finish` is automatically BLOCKED if the workspace worktree still exists —
+   you will get an error message telling you to call `evolution_workspace` first.
