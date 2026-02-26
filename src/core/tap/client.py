@@ -24,6 +24,7 @@ Usage:
 
 import json
 import subprocess
+import signal
 import sys
 import os
 import threading
@@ -156,9 +157,16 @@ class TapClient:
         self._abort_timer.start()
 
     def _force_kill(self) -> None:
-        """Force kill the agent process."""
+        """Force kill the agent process group (includes browser-use etc.)."""
         if self._proc and self._proc.poll() is None:
-            self._proc.kill()
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                # fallback: 单进程 kill
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
 
     # -- Event consumption --------------------------------------------------
 
@@ -205,11 +213,14 @@ class TapClient:
             except Exception:
                 pass
 
-            # Wait briefly, then kill
+            # Wait briefly, then kill process group
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
+                try:
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._proc.kill()
 
         self._alive = False
 
