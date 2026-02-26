@@ -14,8 +14,9 @@ implement it, test it, and report results. Each round = one improvement.
 ## Evolution State
 At the start of each round:
 1. Read `{{root_path}}/evolution_state.json` using read_file.
-2. Parse the history to understand what has been done and what failed.
-3. NEVER repeat a failed approach without a fundamentally different strategy.
+2. **The field `current_round` tells you which round you are running.** Use this as N in all naming (branch, report, state update). Do NOT compute it yourself.
+3. Parse the history to understand what has been done and what failed.
+4. NEVER repeat a failed approach without a fundamentally different strategy.
 
 ## Allowed Evolution Directions (open, as long as testable)
 Any improvement to the multi-agent framework is allowed, including but not limited to:
@@ -150,6 +151,10 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 
 1. Read Tester's result_summary from central_plan.md
 2. **PASS** (Tester says VERDICT: PASS):
+
+   > ⚠️ **MANDATORY GIT STEPS — do NOT skip, do NOT jump to writing the report first.**
+   > These steps apply the workspace changes to the real project. If you skip them, the improvement is LOST.
+
    a. `bash` → rsync workspace back to project root:
       ```bash
       rsync -a \
@@ -157,11 +162,14 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
         --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
         {{blackboard}}/resources/workspace/ {{root_path}}/
       ```
-   b. `bash` → `git -C {{root_path}} diff --name-only` — see exactly what changed
-   c. `bash` → `git -C {{root_path}} add <files from diff>` — list files explicitly, NEVER `git add -A`
-   d. `bash` → `git -C {{root_path}} commit -m "evolution(round-N): [description]"`
+   b. `bash` → `git -C {{root_path}} diff --name-only` — confirm which files changed
+   c. `bash` → `git -C {{root_path}} add <each file from diff output>` — list explicitly, NEVER `git add -A`
+   d. `bash` → `git -C {{root_path}} commit -m "evolution(round-{N}): [description]"`
    e. `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
    f. The branch `evolution/round-{N}` remains as a permanent record
+
+   Only AFTER completing steps a–e, proceed to step 3 (write report).
+
 3. **FAIL** (Tester says VERDICT: FAIL or any error):
    - Do NOT rsync. The real project tree is untouched.
    - `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
@@ -170,9 +178,9 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 4. Write evolution report:
    `write_file` → `{{root_path}}/evolution_reports/round_{NNN}_{timestamp}.md`
    Include: direction, research, changes, test results, verdict, branch name
-5. Update evolution state:
+5. Update evolution state — **use `current_round` (N) as the round number**:
    `read_file` → `{{root_path}}/evolution_state.json`
-   `write_file` → update with new round entry (include branch name in history)
+   `write_file` → set `"round": N`, add new entry to `"history"` list (include branch name), keep existing entries
 6. Update central_plan.md mission status to DONE, then call `finish` to exit
 
 ### Phase 3.5: Recovery Protocol
@@ -180,7 +188,7 @@ If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
 1. Do NOT rsync — workspace is discarded, real project tree is safe
 2. `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
 3. The failed branch is KEPT (do NOT delete it)
-4. Record failure in evolution_state.json
+4. Record failure in evolution_state.json: set `"round": N` (current_round), add FAIL entry to history
 5. Write failure report to evolution_reports/
 6. Update central_plan.md mission status to DONE
 7. Call `finish` — the next round starts fresh

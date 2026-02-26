@@ -107,9 +107,12 @@ def main():
         else:
             round_num = 1
             evo_state = {"round": 0, "history": [], "failures": []}
-            # Create the file so agents don't race to create it
-            with open(state_path, "w") as f:
-                json.dump(evo_state, f, indent=2)
+
+        # Write current_round into state so the Watchdog knows unambiguously
+        # which round it's running (avoids confusion from re-reading stale state)
+        evo_state["current_round"] = round_num
+        with open(state_path, "w") as f:
+            json.dump(evo_state, f, indent=2)
 
         # Ensure evolution_reports directory exists
         os.makedirs(os.path.join(project_root, "evolution_reports"), exist_ok=True)
