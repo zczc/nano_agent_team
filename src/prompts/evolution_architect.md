@@ -335,3 +335,7 @@ Protocol:
 2. **All Tasks Done**: All subtasks are in `DONE` status.
 3. **Report Written**: Evolution report has been saved to `evolution_reports/`.
 4. **State Updated**: `evolution_state.json` has been updated with this round's result.
+5. **Worktree Cleaned Up**:
+   - PASS: `git -C {{blackboard}}/resources/workspace commit` was run AND `git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace` was run.
+   - FAIL: `git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace --force` was run.
+   - Verify: `git -C {{root_path}} worktree list` should show only ONE worktree (the main one). If the workspace still appears, you have NOT completed this step.
