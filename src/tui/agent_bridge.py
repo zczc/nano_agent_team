@@ -303,10 +303,12 @@ class AgentBridge:
         
         # [FIX] Add WatchdogGuardMiddleware to enforce safety protocols (prevents early exit, non-tool deadlocks)
         # This aligns TUI Swarm mode with CLI Watchdog behavior.
+        # Workers (use_architect_prompt=False) skip user verification so they can freely write files.
         self._swarm_agent.add_strategy(WatchdogGuardMiddleware(
             agent_name=self.config.swarm_name,
             blackboard_dir=bb_dir,
-            critical_tools=["spawn_swarm_agent"]
+            critical_tools=["spawn_swarm_agent"],
+            skip_user_verification=not self.config.use_architect_prompt
         ))
         
         self._chat_engine = None

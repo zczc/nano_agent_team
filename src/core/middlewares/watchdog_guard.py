@@ -17,12 +17,17 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
     Watchdog Guard Middleware (StrategyMiddleware Pattern)
 
     Intercepts the LLM stream to enforce protocol:
-    1. If Response has NO tool calls -> Inject a fake 'protocol_enforcement_alert' tool call.
-    2. If Response has 'spawn_swarm_agent' but NO 'ask_user' in history ->
-       Intercept stream, RENAME tool to 'protocol_enforcement_alert', and replace args.
-    3. If Response has 'finish_tool' but NOT ALL critical_tools used ->
-       Intercept stream, RENAME tool to 'protocol_enforcement_alert', and replace args.
+    Rule A: If 'spawn_swarm_agent' but NO 'ask_user' in history ->
+            Rename to 'wait' with warning (must verify plan first).
+    Rule C: If 'write_file'/'edit_file' but NO 'ask_user' in history ->
+            Rename to 'wait' with warning (Architect must not do execution work).
+    Rule B: If 'finish' but mission status is 'IN_PROGRESS' ->
+            Rename to 'wait' with warning (must complete mission first).
+            'UNKNOWN' status (no plan/tasks) is allowed to finish.
+    End-of-stream: If NO tool calls -> inject ask_user / wait / finish as appropriate.
     """
+    EXECUTION_TOOLS = {"write_file", "edit_file"}
+
     def __init__(self, agent_name: str = "Assistant", blackboard_dir: str = ".blackboard", critical_tools: List[str] = None, skip_user_verification: bool = False):
         self.agent_name = agent_name
         self.blackboard_dir = blackboard_dir
@@ -209,13 +214,26 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                             tc.function.arguments = json.dumps(args)
                             modified_tool_calls.append(tc)
 
+                        # Rule C: Unverified Execution -> Warning (Architect must not do execution work)
+                        elif tool_name in self.EXECUTION_TOOLS and not has_verified_plan:
+                            replace_mode = True
+                            replacement_tool_index = tc.index
+
+                            tc.function.name = "wait"
+                            warning_msg = "[SYSTEM WARNING] EXECUTION VIOLATION: You are the Architect and attempted to execute work directly via '{}'. You must NOT do execution work yourself. First call 'ask_user' to verify your plan, then use 'spawn_swarm_agent' to delegate execution to worker agents.".format(tool_name)
+                            args = {
+                                "duration": 0.1,
+                                "wait_for_new_index": False,
+                                "reason": warning_msg
+                            }
+                            tc.function.arguments = json.dumps(args)
+                            modified_tool_calls.append(tc)
+
                         # Rule B: Finish Logic
                         elif tool_name == "finish":
                             mission_status = self._check_mission_status()
 
-                            if mission_status == "DONE":
-                                modified_tool_calls.append(tc)
-                            else:
+                            if mission_status == "IN_PROGRESS":
                                 replace_mode = True
                                 replacement_tool_index = tc.index
 
@@ -227,6 +245,9 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                                     "reason": warning_msg
                                 }
                                 tc.function.arguments = json.dumps(args)
+                                modified_tool_calls.append(tc)
+                            else:
+                                # DONE or UNKNOWN -> allow finish
                                 modified_tool_calls.append(tc)
 
                         else:
