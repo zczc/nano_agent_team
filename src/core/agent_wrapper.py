@@ -119,6 +119,11 @@ class SwarmAgent:
                 self.deregister()
             except Exception:
                 pass
+            # 杀掉自己所在的整个进程组（含 browser-use 等子进程），避免孤儿进程
+            try:
+                os.killpg(os.getpgid(os.getpid()), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
             sys.exit(0)
 
         try:

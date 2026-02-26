@@ -2,6 +2,7 @@
 import os
 import sys
 import subprocess
+import signal
 import time
 from typing import Dict, Any, Optional
 
@@ -136,7 +137,8 @@ class SpawnSwarmAgentTool(BaseTool):
                     stdout=log_f,
                     stderr=log_f,
                     cwd=os.getcwd(), # Ensure we run from project root
-                    env=os.environ.copy() # Pass current env
+                    env=os.environ.copy(), # Pass current env
+                    start_new_session=True, # 创建新进程组，便于整组清理（含 browser-use 等子进程）
                 )
 
                 # IMPORTANT: Write PID to log for status_tool tracking
@@ -160,16 +162,25 @@ class SpawnSwarmAgentTool(BaseTool):
             return f"Error spawning agent: {str(e)}"
 
     def _cleanup_process(self, proc, blackboard_dir: str, name: str):
-        """Terminate a spawned process and mark it DEAD in registry."""
+        """Terminate a spawned process GROUP and mark it DEAD in registry."""
         try:
-            proc.terminate()
+            # 杀整个进程组（含 browser-use、bash 等子进程），避免孤儿进程
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                os.killpg(pgid, signal.SIGKILL)
                 proc.wait(timeout=3)
+        except (ProcessLookupError, PermissionError):
+            pass  # 进程已退出
         except Exception:
-            pass
+            # fallback: 单进程 kill
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                pass
 
         # Mark agent as DEAD in registry
         try:
