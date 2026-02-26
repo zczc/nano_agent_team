@@ -14,9 +14,11 @@ implement it, test it, and report results. Each round = one improvement.
 ## Evolution State
 At the start of each round:
 1. Read `{{root_path}}/evolution_state.json` using read_file.
-2. **The field `current_round` tells you which round you are running.** Use this as N in all naming (branch, report, state update). Do NOT compute it yourself.
-3. Parse the history to understand what has been done and what failed.
-4. NEVER repeat a failed approach without a fundamentally different strategy.
+2. **The field `current_round` tells you which round you are running.** Use this as N in report naming and state updates.
+3. **The field `current_branch` is the pre-computed git branch name for this round** (e.g. `evolution/r3-20260226_160000`). Use this exact string — do NOT invent a branch name yourself.
+4. **The field `base_branch` is where to branch FROM** (the last successful evolution branch, or the starting branch for round 1). Use it in the worktree add command.
+5. Parse the history to understand what has been done and what failed.
+6. NEVER repeat a failed approach without a fundamentally different strategy.
 
 ## Allowed Evolution Directions (open, as long as testable)
 Any improvement to the multi-agent framework is allowed, including but not limited to:
@@ -125,10 +127,12 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
    - Task 2: "Test and verify" (type: standard, status: BLOCKED, dependencies: [1])
 3. **Create workspace as a git worktree** (YOU do this before spawning any agent):
    ```bash
-   git -C {{root_path}} worktree add -b evolution/round-{N} {{blackboard}}/resources/workspace HEAD
+   git -C {{root_path}} worktree add -b {BRANCH} {{blackboard}}/resources/workspace {BASE_BRANCH}
    ```
-   This creates branch `evolution/round-{N}` and checks it out in the workspace directory.
-   The main worktree stays on your current branch — no `git checkout` needed.
+   - `{BRANCH}` = value of `current_branch` from `evolution_state.json` (e.g. `evolution/r3-20260226_160000`)
+   - `{BASE_BRANCH}` = value of `base_branch` from `evolution_state.json`
+     (last PASS branch for serial accumulation, or starting branch for round 1)
+   - Do NOT use `HEAD` or invent either name yourself.
 4. `spawn_swarm_agent` → Developer agent:
    - Role: see Developer Agent Role template below
    - Goal: implement the proposal in `{{blackboard}}/resources/workspace/`
@@ -142,7 +146,9 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 
 ### Phase 3: Judge & Report
 
-> **BRANCH POLICY**: Each round's branch is KEPT as a permanent record. NEVER merge into main. NEVER delete the branch. The branch IS the deliverable.
+> **BRANCH POLICY**: Each round's branch is KEPT as a permanent record. NEVER merge or delete branches.
+> The starting branch (e.g. `dev/self_evolve`) is NEVER modified — it stays as the fixed origin.
+> Serial accumulation is via `base_branch` in state.json: on PASS, the next round branches from this round's branch. On FAIL, `base_branch` is unchanged — next round retries from the same base.
 
 1. Read Tester's result_summary from central_plan.md.
 
@@ -179,7 +185,7 @@ If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
 1. Call `evolution_workspace(verdict="FAIL", round_num=N)` to discard the workspace.
    (If worktree was never created, the tool will return harmlessly.)
 2. Main worktree branch is unchanged throughout — no `git checkout` needed.
-3. The failed branch `evolution/round-{N}` is KEPT for post-mortem.
+3. The failed branch (`current_branch` from state.json) is KEPT for post-mortem.
 4. Record failure in evolution_state.json: set `"round": N` (current_round), add FAIL entry to history.
 5. Write failure report to evolution_reports/.
 6. Update central_plan.md mission status to DONE.
@@ -234,9 +240,12 @@ evolution_state.json format:
 ```json
 {
   "round": 5,
+  "current_round": 5,
+  "current_branch": "evolution/r5-20260226_160000",
+  "base_branch": "evolution/r4-20260226_155000",
   "history": [
-    {"round": 1, "title": "...", "verdict": "PASS", "branch": "evolution/round-1", "files": [...]},
-    {"round": 2, "title": "...", "verdict": "FAIL", "branch": "evolution/round-2", "reason": "..."}
+    {"round": 1, "title": "...", "verdict": "PASS", "branch": "evolution/r1-20260226_154530", "files": [...]},
+    {"round": 2, "title": "...", "verdict": "FAIL", "branch": "evolution/r2-20260226_155100", "reason": "..."}
   ],
   "failures": [
     {"round": 2, "approach": "...", "error": "..."}

@@ -109,9 +109,27 @@ def main():
             round_num = 1
             evo_state = {"round": 0, "history": [], "failures": []}
 
-        # Write current_round into state so the Watchdog knows unambiguously
-        # which round it's running (avoids confusion from re-reading stale state)
+        # Write current_round, unique branch name, and base_branch into state.
+        # - current_branch: unique name for this round's new branch (timestamp avoids conflicts)
+        # - base_branch: where to branch FROM (last PASS branch for serial accumulation,
+        #   or the starting git branch if no PASS history yet — dev/self_evolve never moves)
+        import datetime as _dt
+        import subprocess as _sp
+        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         evo_state["current_round"] = round_num
+        evo_state["current_branch"] = f"evolution/r{round_num}-{_ts}"
+
+        # Serial accumulation: find last PASS branch to branch from
+        _history = evo_state.get("history", [])
+        _last_pass = next((h for h in reversed(_history) if h.get("verdict") == "PASS"), None)
+        if _last_pass:
+            evo_state["base_branch"] = _last_pass["branch"]
+        else:
+            # No PASS yet — branch from current HEAD (the fixed starting branch)
+            _r = _sp.run(["git", "branch", "--show-current"],
+                         capture_output=True, text=True, cwd=project_root)
+            evo_state["base_branch"] = _r.stdout.strip() or "HEAD"
+
         with open(state_path, "w") as f:
             json.dump(evo_state, f, indent=2)
 

@@ -85,6 +85,13 @@ class EvolutionWorkspaceTool(BaseTool):
             if not changed_files:
                 return "Error: changed_files is required for PASS verdict."
 
+            # 0. Read branch name from worktree BEFORE removing it
+            branch_result = subprocess.run(
+                ["git", "-C", workspace, "branch", "--show-current"],
+                capture_output=True, text=True
+            )
+            evolution_branch = branch_result.stdout.strip() or f"evolution/r{round_num}"
+
             # 1. Stage the changed files
             add_result = subprocess.run(
                 ["git", "-C", workspace, "add"] + changed_files,
@@ -94,7 +101,7 @@ class EvolutionWorkspaceTool(BaseTool):
                 return f"Error staging files: {add_result.stderr.strip()}"
 
             # 2. Commit
-            commit_msg = f"evolution(round-{round_num}): {description}"
+            commit_msg = f"evolution({evolution_branch}): {description}"
             commit_result = subprocess.run(
                 ["git", "-C", workspace, "commit", "-m", commit_msg],
                 capture_output=True, text=True
@@ -118,10 +125,17 @@ class EvolutionWorkspaceTool(BaseTool):
             first_line = commit_result.stdout.strip().split("\n")[0]
             return (
                 f"PASS: committed {len(changed_files)} file(s) to branch "
-                f"evolution/round-{round_num} ({first_line}). Worktree removed."
+                f"{evolution_branch} ({first_line}). Worktree removed."
             )
 
         else:  # FAIL
+            # Read branch name for the message
+            branch_result = subprocess.run(
+                ["git", "-C", workspace, "branch", "--show-current"],
+                capture_output=True, text=True
+            )
+            evolution_branch = branch_result.stdout.strip() or f"evolution/r{round_num}"
+
             remove_result = subprocess.run(
                 ["git", "-C", root, "worktree", "remove", workspace, "--force"],
                 capture_output=True, text=True
@@ -130,5 +144,5 @@ class EvolutionWorkspaceTool(BaseTool):
                 return f"Error removing worktree: {remove_result.stderr.strip()}"
             return (
                 f"FAIL: workspace discarded. "
-                f"Branch evolution/round-{round_num} kept for post-mortem."
+                f"Branch {evolution_branch} kept for post-mortem."
             )
