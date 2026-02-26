@@ -262,7 +262,11 @@ class LocalEnvironment(Environment):
                         reason = f"Dangerous command targets outside sandbox: {part}"
                         break
             
-            if ".." in command:
+            # Only check path traversal in the command arguments, not heredoc content.
+            # Heredoc bodies (e.g. Python source code) can contain ".." in strings/imports
+            # which would cause false positives when scanning the full command string.
+            check_cmd = command.split("<<")[0] if "<<" in command else command
+            if ".." in check_cmd:
                 is_safe = False
                 reason = "Dangerous command contains path traversal ('..')"
 

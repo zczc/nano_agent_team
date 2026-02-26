@@ -272,6 +272,10 @@ Write all new/modified files directly here using their normal relative paths:
   - e.g., new test   → `{{blackboard}}/resources/workspace/tests/test_foo.py`
   - e.g., edit utils → `{{blackboard}}/resources/workspace/src/utils/bar.py`
 
+## Writing Files
+Use the `write_file` tool to create or overwrite files — do NOT use bash heredoc (`cat > file << 'EOF'`).
+Example: `write_file(file_path="{{blackboard}}/resources/workspace/backend/tools/foo.py", content="...")`
+
 ## Running Code
 To run Python in the workspace (e.g. for import tests):
 ```bash
