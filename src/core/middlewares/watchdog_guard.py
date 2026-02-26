@@ -23,10 +23,11 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
     3. If Response has 'finish_tool' but NOT ALL critical_tools used ->
        Intercept stream, RENAME tool to 'protocol_enforcement_alert', and replace args.
     """
-    def __init__(self, agent_name: str = "Assistant", blackboard_dir: str = ".blackboard", critical_tools: List[str] = None):
+    def __init__(self, agent_name: str = "Assistant", blackboard_dir: str = ".blackboard", critical_tools: List[str] = None, skip_user_verification: bool = False):
         self.agent_name = agent_name
         self.blackboard_dir = blackboard_dir
         self.critical_tools = critical_tools or []
+        self.skip_user_verification = skip_user_verification
         self._registry = RegistryManager(blackboard_dir)
 
     def _is_anyone_else_running(self) -> bool:
@@ -148,7 +149,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
         # 1. PRE-CALCULATE STATE from session
 
         # Check plan verification status
-        has_verified_plan = False
+        has_verified_plan = self.skip_user_verification  # Evolution mode skips ask_user gate
         # Check critical tool usage (scan entire history)
         used_tools = set()
 

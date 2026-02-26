@@ -3,6 +3,7 @@ import os
 import sys
 import argparse
 import shutil
+import json
 from src.core.agent_wrapper import SwarmAgent
 from backend.infra.config import Config
 from backend.tools.web_search import SearchTool
@@ -70,6 +71,9 @@ def main():
     parser.add_argument("--model", type=str, default=None, help="Model provider key (default: Use settings.json)")
     
 
+    # Evolution mode
+    parser.add_argument("--evolution", action="store_true", help="Run in self-evolution mode")
+
     # Global flags
     parser.add_argument("--keys", type=str, default="keys.json", help="Path to keys.json (default: keys.json)")
     
@@ -83,26 +87,62 @@ def main():
     # 2. Setup Environment (Clean Blackboard)
     setup_env(args)
 
-    # 3. Load Architect/Watchdog Prompt
-    # By default we use the Architect prompt which is designed to plan swarms
-    prompt_path = os.path.join(project_root, "src/prompts/architect.md")
-    if not os.path.exists(prompt_path):
-        print(f"Error: Prompt file not found at {prompt_path}")
-        return
+    # 3. Load Prompt & Determine Mission
+    if args.evolution:
+        # Evolution mode: use evolution architect prompt
+        prompt_path = os.path.join(project_root, "src/prompts/evolution_architect.md")
+        if not os.path.exists(prompt_path):
+            print(f"Error: Evolution prompt not found at {prompt_path}")
+            return
 
-    with open(prompt_path, "r", encoding="utf-8") as f:
-        architect_role_content = f.read()
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            architect_role_content = f.read()
 
+        # Read or initialize evolution state
+        state_path = os.path.join(project_root, "evolution_state.json")
+        if os.path.exists(state_path):
+            with open(state_path) as f:
+                evo_state = json.load(f)
+            round_num = evo_state.get("round", 0) + 1
+        else:
+            round_num = 1
+            evo_state = {"round": 0, "history": [], "failures": []}
+            # Create the file so agents don't race to create it
+            with open(state_path, "w") as f:
+                json.dump(evo_state, f, indent=2)
 
-    # 4. Determine Mission
-    mission = args.query
-    if not mission:
-        print("\nPlease enter the Swarm Mission:")
-        mission = input("> ").strip()
-    
-    if not mission:
-        print("No mission provided. Exiting.")
-        return
+        # Ensure evolution_reports directory exists
+        os.makedirs(os.path.join(project_root, "evolution_reports"), exist_ok=True)
+
+        mission = (
+            f"Self-Evolution Round {round_num}.\n\n"
+            f"Evolution History (last 5 rounds):\n"
+            f"{json.dumps(evo_state.get('history', [])[-5:], indent=2, ensure_ascii=False)}\n\n"
+            f"Past Failures to Avoid:\n"
+            f"{json.dumps(evo_state.get('failures', [])[-10:], indent=2, ensure_ascii=False)}\n\n"
+            f"Analyze the framework, find an improvement, implement it, test it, "
+            f"and write a report to evolution_reports/."
+        )
+        print(f"\n[Evolution] Starting Round {round_num}")
+    else:
+        # Normal mode: use architect prompt
+        prompt_path = os.path.join(project_root, "src/prompts/architect.md")
+        if not os.path.exists(prompt_path):
+            print(f"Error: Prompt file not found at {prompt_path}")
+            return
+
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            architect_role_content = f.read()
+
+        # 4. Determine Mission
+        mission = args.query
+        if not mission:
+            print("\nPlease enter the Swarm Mission:")
+            mission = input("> ").strip()
+
+        if not mission:
+            print("No mission provided. Exiting.")
+            return
 
     blackboard_dir = os.path.join(project_root, ".blackboard")
 
@@ -121,7 +161,8 @@ def main():
         watchdog_guard = WatchdogGuardMiddleware(
             agent_name=args.name,
             blackboard_dir=blackboard_dir,
-            critical_tools=["spawn_swarm_agent"]
+            critical_tools=["spawn_swarm_agent"],
+            skip_user_verification=args.evolution
         )
 
         # The Watchdog uses the Architect role to design and spawn other agents.
@@ -141,7 +182,8 @@ def main():
         env = LocalEnvironment(
             workspace_root=project_root,
             blackboard_dir=blackboard_dir,
-            agent_name=args.name
+            agent_name=args.name,
+            auto_approve_patterns=["git "] if args.evolution else []
         )
         watchdog.add_tool(BashTool(env=env))
         watchdog.add_tool(WriteFileTool(env=env))
@@ -153,11 +195,18 @@ def main():
         print(f"\n[Launcher] Starting {args.name} ({args.role})")
         print(f"[Launcher] Mission: {mission}\n")
         
-        watchdog.run(
-            goal=f"The User's Mission is: {mission}",
-            scenario="You are the Root Architect. Analyze the mission, design the blackboard indices, and spawn agents to execute it.",
-            critical_tools=["spawn_swarm_agent"]
-        )
+        if args.evolution:
+            watchdog.run(
+                goal=f"The Evolution Mission is:\n{mission}",
+                scenario="You are the Evolution Architect. Follow the evolution protocol strictly.",
+                critical_tools=["spawn_swarm_agent"]
+            )
+        else:
+            watchdog.run(
+                goal=f"The User's Mission is: {mission}",
+                scenario="You are the Root Architect. Analyze the mission, design the blackboard indices, and spawn agents to execute it.",
+                critical_tools=["spawn_swarm_agent"]
+            )
     except KeyboardInterrupt:
         print("\n[Launcher] Interrupted by user.")
     finally:

@@ -11,7 +11,7 @@ class LocalEnvironment(Environment):
     Local environment implementation using subprocess and os.
     Includes security checks (audit guard and dangerous token detection).
     """
-    def __init__(self, workspace_root: str, blackboard_dir: str, allowed_write_paths: Optional[List[str]] = None, confirmation_callback: Optional[Callable[[str], bool]] = None, non_interactive: bool = False, agent_name: str = "UnknownAgent"):
+    def __init__(self, workspace_root: str, blackboard_dir: str, allowed_write_paths: Optional[List[str]] = None, confirmation_callback: Optional[Callable[[str], bool]] = None, non_interactive: bool = False, agent_name: str = "UnknownAgent", auto_approve_patterns: Optional[List[str]] = None):
         """
         Args:
             workspace_root: The root directory for this environment (sandbox root).
@@ -31,6 +31,7 @@ class LocalEnvironment(Environment):
         self.confirmation_callback = confirmation_callback
         self.non_interactive = non_interactive
         self.agent_name = agent_name
+        self.auto_approve_patterns = auto_approve_patterns or []
         
         if self.non_interactive:
             # Import here to avoid circular dependencies if any (though RequestManager is standalone)
@@ -231,6 +232,11 @@ class LocalEnvironment(Environment):
         """
         Perform security checks on the command to be executed.
         """
+        # Auto-approve whitelisted patterns (e.g., evolution mode auto-approves git)
+        for pattern in self.auto_approve_patterns:
+            if command.strip().startswith(pattern):
+                return True
+
         is_safe = True
         reason = ""
         
