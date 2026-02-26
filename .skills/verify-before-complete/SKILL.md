@@ -3,46 +3,80 @@
 ## Purpose
 Systematic verification checklist before marking any task as DONE.
 
+## Working Directory
+All checks run inside the workspace copy:
+  `{{blackboard}}/resources/workspace/`
+
+Use this Python command pattern for ALL checks:
+```bash
+cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/workspace {{root_path}}/.venv/bin/python ...
+```
+
 ## Verification Checklist
 
-### 1. Syntax & Import Check
+### 1. Confirm Changed Files Exist
+Read Developer's result_summary to get the `CHANGED_FILES` list.
+For each file, verify it exists:
 ```bash
-python -c "import py_compile; py_compile.compile('<file>', doraise=True)"
+ls -la {{blackboard}}/resources/workspace/<file>
 ```
-Run for EVERY modified .py file.
 
-### 2. Dependency Check
-Verify no new dependencies are needed, or they're in requirements.txt.
-
-### 3. Functional Verification
-- Instantiate the new/modified component.
-- Call its primary method with sample input.
-- Verify output is reasonable.
-
-### 4. Integration Smoke Test
+### 2. Syntax & Import Check
+For EVERY `.py` file in CHANGED_FILES:
 ```bash
-python -c "
-from backend.infra.config import Config
-Config.initialize('keys.json')
-# Try to import and basic-use the changed module
+cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/workspace {{root_path}}/.venv/bin/python -c "import py_compile; py_compile.compile('<file>', doraise=True); print('syntax OK')"
+```
+
+### 3. Import Smoke Test
+```bash
+cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/workspace {{root_path}}/.venv/bin/python -c "from <module> import <Class>; print('import OK')"
+```
+
+### 4. Functional Verification
+Instantiate and call the new/modified component:
+```bash
+cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/workspace {{root_path}}/.venv/bin/python -c "
+from <module> import <Class>
+obj = <Class>()
+result = obj.<primary_method>(<sample_input>)
+assert result is not None, 'got None'
+print('functional OK:', result)
 "
 ```
 
-### 5. Side Effect Check
-- Verify no existing tests are broken.
-- Verify no import cycles introduced.
-- Check `git diff --stat` to confirm only expected files changed.
+### 5. Run Test Files
+If Developer created test files, run them yourself — do NOT trust Developer's self-reported output:
+```bash
+cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/workspace {{root_path}}/.venv/bin/python -m pytest tests/test_<feature>.py -v 2>&1
+```
 
-### 6. Report Format
+### 6. No Side-Effect Check
+Verify only expected files were modified:
+```bash
+diff -rq --exclude='__pycache__' --exclude='*.pyc' \
+  {{blackboard}}/resources/workspace/src {{root_path}}/src
+diff -rq --exclude='__pycache__' --exclude='*.pyc' \
+  {{blackboard}}/resources/workspace/backend {{root_path}}/backend
+```
+Only the CHANGED_FILES from Developer's summary should appear. Any unexpected diff is a red flag.
+
+### 7. Report Format
 Write result_summary as:
 ```
 VERDICT: PASS|FAIL
 FILES_CHECKED: [list]
-TESTS_RUN: [count passed]/[count total]
-ISSUES: [none or description]
+COMMANDS_RUN:
+  - [command 1]
+  - [command 2]
+TESTS_RUN: [N passed]/[N total]
+ACTUAL_OUTPUT:
+  [paste real command output here]
+ISSUES: [none | detailed error]
 ```
 
 ## Rules
-- NEVER mark a task DONE without running ALL checks.
-- If ANY check fails, mark as FAIL with detailed error.
-- Include full command output in report.
+- NEVER mark DONE without running ALL checks
+- NEVER trust Developer's self-reported test results — always re-run yourself
+- If ANY check fails → VERDICT: FAIL with full error output
+- Always paste REAL command output, never summarize or fabricate
+- Use `.venv/bin/python` via `{{root_path}}/.venv/bin/python`, not bare `python`
