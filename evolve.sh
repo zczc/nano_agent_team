@@ -50,9 +50,28 @@ while [ $ROUND -le $MAX_ROUNDS ]; do
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Round $ROUND finished (exit: $EXIT_CODE)"
 
-    # List evolution branches
-    echo "[BRANCHES] Evolution branches:"
-    git branch --list 'evolution/*'
+    # ── Post-round snapshot ──────────────────────────────────────────────────
+    echo ""
+    echo "┌─ [STATE] evolution_state.json ─────────────────────────────────────"
+    cat evolution_state.json 2>/dev/null || echo "(not found)"
+    echo ""
+    echo "└─────────────────────────────────────────────────────────────────────"
+
+    echo ""
+    echo "┌─ [GIT LOG] recent commits ──────────────────────────────────────────"
+    git log --oneline -8
+    echo "└─────────────────────────────────────────────────────────────────────"
+
+    echo ""
+    echo "┌─ [BRANCHES] evolution/* ────────────────────────────────────────────"
+    git branch --list 'evolution/*' -v
+    echo "└─────────────────────────────────────────────────────────────────────"
+
+    echo ""
+    echo "┌─ [REPORTS] evolution_reports/ ─────────────────────────────────────"
+    ls -lt evolution_reports/ 2>/dev/null | head -6 || echo "(empty)"
+    echo "└─────────────────────────────────────────────────────────────────────"
+    echo ""
 
     # Stop signal check
     if [ -f ".evolution_stop" ]; then

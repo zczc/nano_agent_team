@@ -145,7 +145,12 @@ def main():
             f"Analyze the framework, find an improvement, implement it, test it, "
             f"and write a report to evolution_reports/."
         )
-        print(f"\n[Evolution] Starting Round {round_num}")
+        print(f"\n[Evolution] ══════════════════════════════════════")
+        print(f"[Evolution] Round     : {round_num}")
+        print(f"[Evolution] Branch    : {evo_state['current_branch']}")
+        print(f"[Evolution] Base from : {evo_state['base_branch']}")
+        print(f"[Evolution] History   : {len(evo_state.get('history', []))} rounds recorded")
+        print(f"[Evolution] ══════════════════════════════════════")
     else:
         # Normal mode: use architect prompt
         prompt_path = os.path.join(project_root, "src/prompts/architect.md")
