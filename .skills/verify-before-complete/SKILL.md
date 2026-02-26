@@ -57,14 +57,13 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 ```
 
 ### 6. No Side-Effect Check
-Verify only expected files were modified:
+The workspace is a git worktree — use git status to see exactly what changed:
 ```bash
-diff -rq --exclude='__pycache__' --exclude='*.pyc' \
-  {{blackboard}}/resources/workspace/src {{root_path}}/src
-diff -rq --exclude='__pycache__' --exclude='*.pyc' \
-  {{blackboard}}/resources/workspace/backend {{root_path}}/backend
+git -C {{blackboard}}/resources/workspace status --short
 ```
-Only the CHANGED_FILES from Developer's summary should appear. Any unexpected diff is a red flag.
+Compare the output against Developer's CHANGED_FILES list.
+Only those files should appear (as `??` untracked or `M` modified).
+Any unexpected file is a red flag → VERDICT: FAIL.
 
 ### 7. Report Format
 Write result_summary as:

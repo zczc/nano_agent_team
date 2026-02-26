@@ -70,30 +70,29 @@ You have access to the following tools:
 
 ## Workspace Convention (CRITICAL)
 
-Each round uses a fresh workspace copy of the project inside the blackboard.
-Sub-agents can only write to the blackboard — so they work in the workspace copy.
-The real project tree is NEVER touched until the Tester gives VERDICT: PASS.
+Each round uses a **git worktree** inside the blackboard as the workspace.
+The worktree is a real git checkout of branch `evolution/round-{N}` — no rsync needed.
 
 ```
-{{blackboard}}/resources/workspace/   ← full copy of project source
+{{blackboard}}/resources/workspace/   ← git worktree for evolution/round-{N}
     backend/
     src/
     tests/
-    blackboard_templates/
-    .skills/
+    .git   ← worktree pointer file (do not delete)
     ...
 ```
 
 **Developer** writes all changes directly to `{{blackboard}}/resources/workspace/`
-as if it were the real project root — no path tricks, no special prefixes.
+using normal relative paths — it IS the project root for that branch.
 
-**Tester** runs all tests inside `{{blackboard}}/resources/workspace/` using:
+**Tester** runs all tests inside the worktree:
 ```bash
 cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/workspace {{root_path}}/.venv/bin/python ...
 ```
 
-**On PASS**: Watchdog (you) rsyncs workspace back to project root.
-**On FAIL**: Workspace is simply discarded — the real project tree is untouched.
+**On PASS**: commit inside the worktree, then `worktree remove`. No rsync.
+**On FAIL**: `worktree remove --force`. Branch kept. Real project tree untouched.
+**Main worktree never changes branch** — Watchdog stays on its starting branch throughout.
 
 ## Blackboard Resource Protocol
 
@@ -124,17 +123,13 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 2. `blackboard create_index` → central_plan.md with exactly 2 tasks:
    - Task 1: "Implement [improvement]" (type: standard, status: PENDING)
    - Task 2: "Test and verify" (type: standard, status: BLOCKED, dependencies: [1])
-3. `bash` → `git -C {{root_path}} checkout -b evolution/round-{N}` to isolate changes
-4. **Copy project to workspace** (YOU do this before spawning any agent):
+3. **Create workspace as a git worktree** (YOU do this before spawning any agent):
    ```bash
-   rsync -a \
-     --exclude='.venv/' --exclude='.blackboard/' --exclude='.git/' \
-     --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
-     --exclude='logs/' --exclude='.agent_cache/' \
-     --exclude='evolution_reports/' --exclude='evolution_state.json' \
-     {{root_path}}/ {{blackboard}}/resources/workspace/
+   git -C {{root_path}} worktree add -b evolution/round-{N} {{blackboard}}/resources/workspace HEAD
    ```
-5. `spawn_swarm_agent` → Developer agent:
+   This creates branch `evolution/round-{N}` and checks it out in the workspace directory.
+   The main worktree stays on your current branch — no `git checkout` needed.
+4. `spawn_swarm_agent` → Developer agent:
    - Role: see Developer Agent Role template below
    - Goal: implement the proposal in `{{blackboard}}/resources/workspace/`
    - Provide the full workspace path and list every file to change
@@ -153,27 +148,32 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 2. **PASS** (Tester says VERDICT: PASS):
 
    > ⚠️ **MANDATORY GIT STEPS — do NOT skip, do NOT jump to writing the report first.**
-   > These steps apply the workspace changes to the real project. If you skip them, the improvement is LOST.
+   > The workspace IS the git branch. Commit there, then remove the worktree.
 
-   a. `bash` → rsync workspace back to project root:
+   a. `bash` → stage changed files in the worktree (list explicitly from Developer's CHANGED_FILES):
       ```bash
-      rsync -a \
-        --exclude='.venv/' --exclude='.blackboard/' --exclude='.git/' \
-        --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' \
-        {{blackboard}}/resources/workspace/ {{root_path}}/
+      git -C {{blackboard}}/resources/workspace add <file1> <file2> ...
       ```
-   b. `bash` → `git -C {{root_path}} diff --name-only` — confirm which files changed
-   c. `bash` → `git -C {{root_path}} add <each file from diff output>` — list explicitly, NEVER `git add -A`
-   d. `bash` → `git -C {{root_path}} commit -m "evolution(round-{N}): [description]"`
-   e. `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
-   f. The branch `evolution/round-{N}` remains as a permanent record
+   b. `bash` → commit in the worktree:
+      ```bash
+      git -C {{blackboard}}/resources/workspace commit -m "evolution(round-{N}): [description]"
+      ```
+   c. `bash` → remove the worktree (now clean after commit):
+      ```bash
+      git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace
+      ```
+   d. The branch `evolution/round-{N}` remains as a permanent record (with the commit).
+   e. Main worktree branch unchanged — no `git checkout` needed.
 
-   Only AFTER completing steps a–e, proceed to step 3 (write report).
+   Only AFTER completing steps a–c, proceed to step 3 (write report).
 
 3. **FAIL** (Tester says VERDICT: FAIL or any error):
-   - Do NOT rsync. The real project tree is untouched.
-   - `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
-   - The failed branch `evolution/round-{N}` is KEPT for post-mortem analysis
+   - `bash` → force-remove the worktree (discards uncommitted workspace changes):
+     ```bash
+     git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace --force
+     ```
+   - The branch `evolution/round-{N}` is KEPT (pointing to HEAD, no new commit) for post-mortem
+   - Main worktree branch unchanged — no `git checkout` needed
    - Record failure reason
 4. Write evolution report:
    `write_file` → `{{root_path}}/evolution_reports/round_{NNN}_{timestamp}.md`
@@ -185,9 +185,13 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 
 ### Phase 3.5: Recovery Protocol
 If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
-1. Do NOT rsync — workspace is discarded, real project tree is safe
-2. `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
-3. The failed branch is KEPT (do NOT delete it)
+1. `bash` → force-remove the worktree:
+   ```bash
+   git -C {{root_path}} worktree remove {{blackboard}}/resources/workspace --force
+   ```
+   (If worktree was never created, skip this step — it will error harmlessly.)
+2. Main worktree branch is unchanged throughout — no `git checkout` needed
+3. The failed branch `evolution/round-{N}` is KEPT for post-mortem
 4. Record failure in evolution_state.json: set `"round": N` (current_round), add FAIL entry to history
 5. Write failure report to evolution_reports/
 6. Update central_plan.md mission status to DONE
