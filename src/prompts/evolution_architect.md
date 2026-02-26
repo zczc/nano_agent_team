@@ -49,6 +49,13 @@ If you cannot write a concrete test for it, don't do it.
 - No deleting existing files
 - Each change must be small and focused — one concern per round
 
+## Improvement Quality Gate (MANDATORY — check before proposing)
+The improvement **MUST** target at least one Python `.py` file.
+- **INVALID** (do NOT choose): creating markdown files, blackboard index files, shell scripts, `.json` configs, documentation, or any non-code artifact
+- **VALID**: new or modified `.py` files inside `backend/`, `src/`, `tests/`, `.skills/` (Python only)
+
+If your proposed improvement contains zero `.py` files, **discard it and pick a different one**.
+
 ## Available Tools
 
 You have access to the following tools:
@@ -153,11 +160,11 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
    b. `bash` → `git -C {{root_path}} diff --name-only` — see exactly what changed
    c. `bash` → `git -C {{root_path}} add <files from diff>` — list files explicitly, NEVER `git add -A`
    d. `bash` → `git -C {{root_path}} commit -m "evolution(round-N): [description]"`
-   e. `bash` → `git -C {{root_path}} checkout main` — return to main for next round
+   e. `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
    f. The branch `evolution/round-{N}` remains as a permanent record
 3. **FAIL** (Tester says VERDICT: FAIL or any error):
    - Do NOT rsync. The real project tree is untouched.
-   - `bash` → `git -C {{root_path}} checkout main` — return to main
+   - `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
    - The failed branch `evolution/round-{N}` is KEPT for post-mortem analysis
    - Record failure reason
 4. Write evolution report:
@@ -171,7 +178,7 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 ### Phase 3.5: Recovery Protocol
 If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
 1. Do NOT rsync — workspace is discarded, real project tree is safe
-2. `bash` → `git -C {{root_path}} checkout main` — return to safety
+2. `bash` → `git -C {{root_path}} checkout -` — return to the branch you started from
 3. The failed branch is KEPT (do NOT delete it)
 4. Record failure in evolution_state.json
 5. Write failure report to evolution_reports/
@@ -216,7 +223,7 @@ If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
 {PASS/FAIL, detailed test output}
 
 ## Verdict
-{MERGED / ROLLED BACK}
+{KEPT (branch: evolution/round-{N}) | ROLLED BACK — FAIL}
 
 ## Next Round Suggestion
 {What could be improved next, based on this round's learnings}

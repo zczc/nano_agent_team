@@ -14,6 +14,12 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 
 ## Verification Checklist
 
+### 0. Python File Gate (FIRST — fail fast)
+Check that CHANGED_FILES contains at least one `.py` file.
+If CHANGED_FILES contains ONLY non-Python files (markdown, JSON, shell, etc.):
+→ **VERDICT: FAIL** immediately. Report: "No Python files changed — invalid evolution improvement."
+Do NOT proceed to further checks.
+
 ### 1. Confirm Changed Files Exist
 Read Developer's result_summary to get the `CHANGED_FILES` list.
 For each file, verify it exists:
@@ -80,3 +86,4 @@ ISSUES: [none | detailed error]
 - If ANY check fails → VERDICT: FAIL with full error output
 - Always paste REAL command output, never summarize or fabricate
 - Use `.venv/bin/python` via `{{root_path}}/.venv/bin/python`, not bare `python`
+- If CHANGED_FILES has no `.py` files → VERDICT: FAIL (gate 0 triggers)
