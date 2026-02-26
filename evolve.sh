@@ -5,6 +5,20 @@
 MAX_ROUNDS=${1:-20}
 ROUND=1
 
+# Resolve python: prefer .venv/bin/python, fall back to python3
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/.venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/.venv/bin/python"
+elif command -v python3 &>/dev/null; then
+    PYTHON="python3"
+else
+    echo "Error: cannot find python. Tried .venv/bin/python and python3."
+    exit 1
+fi
+
+# Track the branch we started on (stay on it between rounds)
+START_BRANCH=$(git branch --show-current)
+
 mkdir -p evolution_reports
 
 echo "╔════════════════════════════════════════╗"
@@ -17,21 +31,21 @@ while [ $ROUND -le $MAX_ROUNDS ]; do
     echo "━━━ Evolution Round $ROUND / $MAX_ROUNDS ━━━"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting..."
 
-    # Ensure we start each round from main branch
+    # Ensure we start each round from the starting branch
     CURRENT_BRANCH=$(git branch --show-current)
-    if [ "$CURRENT_BRANCH" != "main" ]; then
-        echo "[SAFETY] Not on main (on $CURRENT_BRANCH). Switching to main..."
-        git checkout main
+    if [ "$CURRENT_BRANCH" != "$START_BRANCH" ]; then
+        echo "[SAFETY] Not on $START_BRANCH (on $CURRENT_BRANCH). Switching back..."
+        git checkout "$START_BRANCH"
     fi
 
-    python main.py --evolution
+    "$PYTHON" main.py --evolution
     EXIT_CODE=$?
 
-    # Safety: always return to main after each round
+    # Safety: always return to starting branch after each round
     CURRENT_BRANCH=$(git branch --show-current)
-    if [ "$CURRENT_BRANCH" != "main" ]; then
-        echo "[SAFETY] Round ended on branch $CURRENT_BRANCH. Returning to main..."
-        git checkout main
+    if [ "$CURRENT_BRANCH" != "$START_BRANCH" ]; then
+        echo "[SAFETY] Round ended on branch $CURRENT_BRANCH. Returning to $START_BRANCH..."
+        git checkout "$START_BRANCH"
     fi
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Round $ROUND finished (exit: $EXIT_CODE)"
