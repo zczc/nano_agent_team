@@ -133,15 +133,25 @@ cd {{blackboard}}/resources/workspace && PYTHONPATH={{blackboard}}/resources/wor
 
 ### Pre-Phase 0: Read State & Create Workspace
 1. `read_file` → `{{root_path}}/evolution_state.json` — record `current_round` (N), `current_branch`, `base_branch`, and `history`.
-2. **Create workspace as a git worktree NOW** — before any agent is spawned:
+2. **Create workspace as a git worktree NOW** — before ANY agent is spawned:
    ```bash
    git -C {{root_path}} worktree add -b {BRANCH} {{blackboard}}/resources/workspace {BASE_BRANCH}
    ```
    - `{BRANCH}` = `current_branch` from state.json
    - `{BASE_BRANCH}` = `base_branch` from state.json
    - Do NOT use `HEAD` or invent names.
+3. **VERIFY the worktree was created successfully.** Check the bash exit code.
+   - If it **failed** (e.g. exit code 128 because the directory already exists), clean up and retry:
+     ```bash
+     rm -rf {{blackboard}}/resources/workspace && git -C {{root_path}} worktree add -b {BRANCH} {{blackboard}}/resources/workspace {BASE_BRANCH}
+     ```
+   - If the branch already exists (e.g. from a previous failed round), use `worktree add` without `-b`:
+     ```bash
+     rm -rf {{blackboard}}/resources/workspace && git -C {{root_path}} worktree add {{blackboard}}/resources/workspace {BRANCH}
+     ```
+   - If it STILL fails after retry, invoke Recovery Protocol (Phase 3.5) immediately.
 
-The workspace is now a live checkout at `{{blackboard}}/resources/workspace/`. All Phase 0 agents scan it directly.
+**CRITICAL ORDERING**: Do NOT spawn any agents and do NOT create blackboard indices until the worktree is confirmed working. The workspace directory MUST contain a `.git` file (not directory) to be a valid worktree.
 
 ---
 
@@ -165,7 +175,8 @@ Initial content must have three empty sections exactly:
 (pending)
 ```
 
-**Step 2** — Spawn all 3 Phase-0 agents simultaneously (one `spawn_swarm_agent` call each, back-to-back without waiting):
+**Step 2** — Spawn all 3 Phase-0 agents simultaneously (one `spawn_swarm_agent` call each, back-to-back without waiting).
+**IMPORTANT**: Only do this AFTER the worktree in Pre-Phase 0 has been successfully created.
 - **Researcher** agent — web_search for new multi-agent features; see role template below
 - **Auditor** agent — scan workspace for capability gaps; see role template below
 - **Historian** agent — analyze evolution history for direction diversity; see role template below
@@ -241,13 +252,14 @@ Each agent replaces its `(pending)` section in `research_brief.md` and calls `fi
 3. **Call `evolution_workspace` tool** — commits (PASS) or discards (FAIL) the workspace.
    `finish` will be BLOCKED until this tool is called.
 
+   This tool auto-detects all changed files via `git diff` and `git ls-files`, so you don't need to list them manually.
+
    - **PASS**:
      ```
      evolution_workspace(
        verdict="PASS",
        round_num=N,
-       description="short description of what was implemented",
-       changed_files=["backend/tools/foo.py", "tests/test_foo.py", "docs/system_design.md", ...]
+       description="short description of what was implemented"
      )
      ```
    - **FAIL**:
@@ -255,14 +267,51 @@ Each agent replaces its `(pending)` section in `research_brief.md` and calls `fi
      evolution_workspace(verdict="FAIL", round_num=N)
      ```
 
+   The tool will return the list of files that were committed. Use this list when writing the evolution report and updating evolution_state.json.
+
 4. Write evolution report:
    `write_file` → `{{root_path}}/evolution_reports/round_{NNN}_{timestamp}.md`
    Include: direction, research, changes, test results, verdict, branch name, integration actions taken
 
+   Extract the changed files list from the `evolution_workspace` tool result (it returns "Changed files: ...").
+
 5. Update evolution state — **use `current_round` (N) as the round number**:
    `read_file` → `{{root_path}}/evolution_state.json`
-   `write_file` → set `"round": N`, add new entry to `"history"` list (include `branch` and `type` fields), keep existing entries.
-   History entry format: `{"round": N, "title": "...", "verdict": "PASS/FAIL", "type": "FEATURE/ENHANCEMENT/BUGFIX/TEST/INTEGRATION", "branch": "...", "files": [...]}`
+   `write_file` → set `"round": N`, add new entry to `"history"` list, keep all existing entries.
+
+   Extract the files list from the `evolution_workspace` tool result for the `"files"` field.
+
+   **PASS entry format** (use ALL fields):
+   ```json
+   {
+     "round": N,
+     "title": "...",
+     "verdict": "PASS",
+     "type": "FEATURE|ENHANCEMENT|BUGFIX|TEST|INTEGRATION",
+     "branch": "evolution/rN-...",
+     "timestamp": "<ISO 8601 UTC>",
+     "files": ["backend/tools/foo.py", "..."],
+     "wired_into": "main.py / tool_registry.py / standalone",
+     "research_hot_topics": "<1-line summary of what Phase 0 Researcher found>",
+     "next_suggestion": "<copy the Next Round Suggestion from the report>"
+   }
+   ```
+
+   **FAIL entry format**:
+   ```json
+   {
+     "round": N,
+     "title": "...",
+     "verdict": "FAIL",
+     "type": "FEATURE|...",
+     "branch": "evolution/rN-...",
+     "timestamp": "<ISO 8601 UTC>",
+     "reason": "<one sentence: root cause of failure>",
+     "files_attempted": ["..."]
+   }
+   ```
+
+   Also update the top-level `"last_suggestion"` field with the current round's Next Round Suggestion so the next round sees it immediately without reading reports.
 
 6. Update central_plan.md mission status to DONE, then call `finish` to exit.
 
@@ -329,12 +378,33 @@ evolution_state.json format:
   "current_round": 5,
   "current_branch": "evolution/r5-20260226_160000",
   "base_branch": "evolution/r4-20260226_155000",
+  "last_suggestion": "Consider adding X next round to build on Y",
   "history": [
-    {"round": 1, "title": "...", "verdict": "PASS", "branch": "evolution/r1-20260226_154530", "files": [...]},
-    {"round": 2, "title": "...", "verdict": "FAIL", "branch": "evolution/r2-20260226_155100", "reason": "..."}
+    {
+      "round": 1,
+      "title": "Cost Tracking Middleware",
+      "verdict": "PASS",
+      "type": "FEATURE",
+      "branch": "evolution/r1-20260226_154530",
+      "timestamp": "2026-02-26T15:45:30Z",
+      "files": ["src/core/middlewares/cost_tracker.py", "main.py"],
+      "wired_into": "main.py (Watchdog middleware chain)",
+      "research_hot_topics": "LLM cost visibility, token budget management in production",
+      "next_suggestion": "Add retry middleware for transient API failures"
+    },
+    {
+      "round": 2,
+      "title": "Retry Middleware",
+      "verdict": "FAIL",
+      "type": "FEATURE",
+      "branch": "evolution/r2-20260226_155100",
+      "timestamp": "2026-02-26T15:51:00Z",
+      "reason": "ImportError: pydantic internal module not accessible",
+      "files_attempted": ["src/core/middlewares/retry.py"]
+    }
   ],
   "failures": [
-    {"round": 2, "approach": "...", "error": "..."}
+    {"round": 2, "approach": "pydantic internal import", "error": "ImportError"}
   ]
 }
 ```
@@ -429,11 +499,16 @@ Each search should come from a genuine hypothesis. Use `web_reader` on the 1-2 m
 
 ## Step 3 — Connect findings back to this framework
 For each interesting finding, ask: can this be added in ONE small, testable round?
-It doesn't have to be a tool. It could be:
-- A middleware (e.g. rate limiting, cost tracking, structured output validation)
-- A new agent coordination pattern in `.skills/`
-- An enhancement to how agents communicate or share context
-- A reliability improvement (retry logic, timeout handling, error recovery)
+Consider the full range of improvement types equally — do NOT default to middleware:
+- A new **tool** (backend/tools/) that agents can call
+- A **utility** (backend/utils/ or src/utils/) used internally
+- A new **skill** (.skills/) that improves agent behavior
+- A **middleware** (src/core/middlewares/) — only if truly needed for reliability
+- An **enhancement** to an existing component's capability
+- An **integration** round that wires up previously-added components
+
+Also read `research_hot_topics` from the last 3 entries in `evolution_state.json` history
+to avoid recommending directions already explored.
 
 ## Output Format
 Use `blackboard append_to_index` to replace `(pending)` under `## RESEARCHER` in `global_indices/research_brief.md`:
