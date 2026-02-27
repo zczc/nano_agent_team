@@ -76,7 +76,7 @@ class SwarmAgent:
                 watch_dir=os.path.join(blackboard_dir, "global_indices"),
                 blackboard_root=blackboard_dir
             ),
-            FinishTool(),
+            FinishTool(agent_name=name, agent_role=role, blackboard_dir=blackboard_dir),
             AskUserTool(),
             SpawnSwarmAgentTool(blackboard_dir, max_iterations=max_iterations)
         ]
@@ -331,11 +331,18 @@ class SwarmAgent:
                     # Collect task info
                     in_progress_tasks = [t for t in my_tasks if t.get("status") == "IN_PROGRESS"]
 
+                    # Format task details for content
+                    task_details = []
+                    for t in in_progress_tasks:
+                        task_details.append(f"  - Task #{t['id']}: {t.get('description', 'N/A')}")
+                    task_details_str = "\n".join(task_details) if task_details else "  (none)"
+
                     message = {
                         "timestamp": datetime.datetime.now().isoformat(),
                         "from": self.name,
                         "type": "max_iterations_reached",
-                        "message": f"⚠️ Agent {self.name} reached max iterations ({self.max_iterations}) and was terminated. Tasks may be incomplete.",
+                        "status": "unread",  # Required by mailbox middleware
+                        "content": f"⚠️ Agent {self.name} reached max iterations ({self.max_iterations}) and was terminated. Tasks may be incomplete.\n\nIN_PROGRESS tasks ({len(in_progress_tasks)}):\n{task_details_str}\n\nPlease review these tasks and decide next steps:\n- Check if tasks are actually complete (check artifacts)\n- Re-spawn worker with higher max_iterations if needed\n- Break down into smaller subtasks if needed",
                         "tasks": [{"id": t["id"], "status": t.get("status"), "description": t.get("description")} for t in my_tasks],
                         "in_progress_count": len(in_progress_tasks)
                     }
