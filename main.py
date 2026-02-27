@@ -82,7 +82,7 @@ def main():
 
     print("=== Nano Agent Team Launcher ===")
 
-    # 1. Initialize Config 
+    # 1. Initialize Config
     Config.initialize(args.keys)
 
     # 2. Setup Environment (Clean Blackboard)
@@ -101,13 +101,19 @@ def main():
 
         # Read or initialize evolution state
         state_path = os.path.join(project_root, "evolution_state.json")
+        evo_state = None
         if os.path.exists(state_path):
-            with open(state_path) as f:
-                evo_state = json.load(f)
-            round_num = evo_state.get("round", 0) + 1
-        else:
+            try:
+                with open(state_path) as f:
+                    evo_state = json.load(f)
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"[Evolution] Warning: evolution_state.json is corrupted ({e}), resetting.")
+                evo_state = None
+        if evo_state is None:
             round_num = 1
             evo_state = {"round": 0, "history": [], "failures": []}
+        else:
+            round_num = evo_state.get("round", 0) + 1
 
         # Write current_round, unique branch name, and base_branch into state.
         # - current_branch: unique name for this round's new branch (timestamp avoids conflicts)

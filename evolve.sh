@@ -1,8 +1,10 @@
 #!/bin/bash
 # Self-Evolution Loop for nano_agent_team
-# Usage: bash evolve.sh [max_rounds]
+# Usage: bash evolve.sh [max_rounds] [model]
+#   model: LLM provider/model key, e.g. qwen/qwen3-max (default), deepseek/deepseek-chat
 
 MAX_ROUNDS=${1:-20}
+EVOLUTION_MODEL=${2:-qwen/qwen-plus}
 ROUND=1
 
 # Resolve python: prefer .venv/bin/python, fall back to python3
@@ -24,6 +26,7 @@ mkdir -p evolution_reports
 echo "╔════════════════════════════════════════╗"
 echo "║   nano_agent_team Self-Evolution Loop  ║"
 echo "║   Max Rounds: $MAX_ROUNDS                       ║"
+echo "║   Model: $EVOLUTION_MODEL"
 echo "╚════════════════════════════════════════╝"
 
 while [ $ROUND -le $MAX_ROUNDS ]; do
@@ -38,7 +41,7 @@ while [ $ROUND -le $MAX_ROUNDS ]; do
         git checkout "$START_BRANCH"
     fi
 
-    "$PYTHON" main.py --evolution
+    "$PYTHON" main.py --evolution --model "$EVOLUTION_MODEL"
     EXIT_CODE=$?
 
     # Safety: always return to starting branch after each round
