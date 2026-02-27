@@ -119,6 +119,11 @@ class SwarmAgent:
                 self.deregister()
             except Exception:
                 pass
+            # 杀掉自己所在的整个进程组（含 browser-use 等子进程），避免孤儿进程
+            try:
+                os.killpg(os.getpgid(os.getpid()), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
             sys.exit(0)
 
         try:
@@ -196,6 +201,9 @@ class SwarmAgent:
                                  return  # Normal exit, don't retry
 
                         except StopIteration:
+                            # Check if we reached max_iterations and need cleanup
+                            print(f"[{self.name}] Agent loop completed.")
+                            self._cleanup_on_max_iterations()
                             return  # Normal completion, don't retry
 
                 except KeyboardInterrupt:
@@ -264,6 +272,90 @@ class SwarmAgent:
     def deregister(self):
         """Updates the agent's status to DEAD in registry.json on exit."""
         RuntimeManager.cleanup_agent(self.name, self.blackboard_dir)
+
+    def _cleanup_on_max_iterations(self):
+        """
+        Cleanup logic when agent reaches max_iterations.
+        Notifies parent agent that worker was interrupted.
+        Does NOT mark tasks as DONE (parent should decide next steps).
+        """
+        try:
+            # Find my tasks for reporting purposes
+            blackboard_tool = None
+            for tool in self.tools:
+                if isinstance(tool, BlackboardTool):
+                    blackboard_tool = tool
+                    break
+
+            my_tasks = []
+            if blackboard_tool:
+                try:
+                    result = blackboard_tool.execute(operation="read_index", filename="central_plan.md")
+                    if "error" not in result.lower() and "not found" not in result.lower():
+                        import json
+                        plan_data = json.loads(result)
+                        plan_content = plan_data.get("content", "")
+
+                        # Extract JSON from markdown
+                        import re
+                        json_match = re.search(r'```json\s*(\{.*?\})\s*```', plan_content, re.DOTALL)
+                        if json_match:
+                            plan_json = json.loads(json_match.group(1))
+                            my_tasks = [
+                                t for t in plan_json.get("tasks", [])
+                                if self.name in t.get("assignees", [])
+                            ]
+                except Exception as e:
+                    print(f"[{self.name}] Failed to read central_plan.md: {e}")
+
+            # Notify parent agent via mailbox
+            parent_pid = None
+            parent_agent_name = None
+
+            # Find parent info from middlewares
+            for strategy in self.engine.strategies:
+                if hasattr(strategy, 'parent_pid'):
+                    parent_pid = strategy.parent_pid
+                if hasattr(strategy, 'parent_agent_name'):
+                    parent_agent_name = strategy.parent_agent_name
+
+            if parent_agent_name:
+                try:
+                    import json
+                    import datetime
+
+                    mailbox_dir = os.path.join(self.blackboard_dir, "mailboxes")
+                    os.makedirs(mailbox_dir, exist_ok=True)
+                    mailbox_path = os.path.join(mailbox_dir, f"{parent_agent_name}.json")
+
+                    # Collect task info
+                    in_progress_tasks = [t for t in my_tasks if t.get("status") == "IN_PROGRESS"]
+
+                    message = {
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "from": self.name,
+                        "type": "max_iterations_reached",
+                        "message": f"⚠️ Agent {self.name} reached max iterations ({self.max_iterations}) and was terminated. Tasks may be incomplete.",
+                        "tasks": [{"id": t["id"], "status": t.get("status"), "description": t.get("description")} for t in my_tasks],
+                        "in_progress_count": len(in_progress_tasks)
+                    }
+
+                    # Append to mailbox
+                    messages = []
+                    if os.path.exists(mailbox_path):
+                        with open(mailbox_path, 'r') as f:
+                            messages = json.load(f)
+                    messages.append(message)
+
+                    with open(mailbox_path, 'w') as f:
+                        json.dump(messages, f, indent=2)
+
+                    print(f"[{self.name}] ⚠️ Notified {parent_agent_name}: reached max_iterations with {len(in_progress_tasks)} IN_PROGRESS tasks")
+                except Exception as e:
+                    print(f"[{self.name}] Failed to notify parent agent: {e}")
+
+        except Exception as e:
+            print(f"[{self.name}] Error in _cleanup_on_max_iterations: {e}")
 
     def handle_event(self, event):
         """Simple CLI Visualization of events + JSONL Logging"""

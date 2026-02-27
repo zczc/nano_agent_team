@@ -316,6 +316,7 @@ Operations:
         """
         Partial update of a task in the specified index file (default: central_plan.md) with CAS.
         """
+        filename = self._sanitize_index_name(filename)
         fpath = os.path.join(self.indices_dir, filename)
         
         if not os.path.exists(fpath):
