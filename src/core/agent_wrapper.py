@@ -115,12 +115,18 @@ class SwarmAgent:
 
         # Register SIGTERM handler for graceful shutdown (cleanup registry before exit)
         # This may fail in TUI worker threads — that's OK, TUI has its own shutdown path.
+        _sigterm_in_progress = False
         def _sigterm_handler(signum, frame):
+            nonlocal _sigterm_in_progress
+            if _sigterm_in_progress:
+                return
+            _sigterm_in_progress = True
             try:
                 self.deregister()
             except Exception:
                 pass
             # 杀掉自己所在的整个进程组（含 browser-use 等子进程），避免孤儿进程
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             try:
                 os.killpg(os.getpgid(os.getpid()), signal.SIGTERM)
             except (ProcessLookupError, PermissionError, OSError):
@@ -276,7 +282,10 @@ class SwarmAgent:
             print(f"[{self.name}] Failed to register.")
 
     def deregister(self):
-        """Updates the agent's status to DEAD in registry.json on exit."""
+        """Updates the agent's status to DEAD in registry.json on exit. Idempotent."""
+        if getattr(self, '_deregistered', False):
+            return
+        self._deregistered = True
         RuntimeManager.cleanup_agent(self.name, self.blackboard_dir)
 
     def _cleanup_on_max_iterations(self):
