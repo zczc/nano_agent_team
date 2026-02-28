@@ -32,11 +32,11 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
     MAX_NO_AGENT_STRIKES = 3
 
     def __init__(self, agent_name: str = "Assistant", blackboard_dir: str = ".blackboard",
-                 critical_tools: List[str] = None, skip_user_verification: bool = False):
+                 skip_user_verification: bool = False, is_architect: bool = True):
         self.agent_name = agent_name
         self.blackboard_dir = blackboard_dir
-        self.critical_tools = critical_tools or []
         self.skip_user_verification = skip_user_verification
+        self.is_architect = is_architect
         self._registry = RegistryManager(blackboard_dir)
         self._no_agent_strike_count = 0
 
@@ -128,7 +128,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
         mission_status = self._check_mission_status()
 
         # PRE-CHECK: Detect dead agents with incomplete tasks and alert Architect
-        if mission_status == "IN_PROGRESS" and not self.skip_user_verification:
+        if mission_status == "IN_PROGRESS" and self.is_architect:
             dead_agents = self._get_dead_agents_with_incomplete_tasks()
             if dead_agents:
                 alert_parts = ["[SYSTEM ALERT: DEAD AGENT DETECTED]"]
@@ -140,7 +140,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                     "ACTION REQUIRED: Spawn a replacement agent for these tasks or reassign them.")
                 session.system_config.extra_sections.append("\n".join(alert_parts))
 
-        if mission_status != "DONE" and mission_status != "UNKNOWN":
+        if self.is_architect and mission_status != "DONE" and mission_status != "UNKNOWN":
             current_turn = sum(1 for msg in session.history if msg["role"] == "assistant")
             last_injection_turn = -1
             persistence_tag = "[SYSTEM INTERVENTION: PERSISTENCE GUARD]"
@@ -267,21 +267,24 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                             })
                             modified_tool_calls.append(tc)
 
-                        # Rule B: Finish Logic
+                        # Rule B: Finish Logic (Architect only — Workers may finish freely)
                         elif tool_name == "finish":
-                            mission_status = self._check_mission_status()
-                            if mission_status == "IN_PROGRESS":
-                                replace_mode = True
-                                replacement_tool_index = tc.index
-                                tc.function.name = "wait"
-                                warning_msg = (
-                                    "PROTOCOL VIOLATION: The Mission is NOT marked as DONE in "
-                                    "`central_plan.md`. You cannot finish yet."
-                                )
-                                tc.function.arguments = json.dumps({
-                                    "duration": 0.1, "wait_for_new_index": False, "reason": warning_msg
-                                })
-                                modified_tool_calls.append(tc)
+                            if self.is_architect:
+                                mission_status = self._check_mission_status()
+                                if mission_status == "IN_PROGRESS":
+                                    replace_mode = True
+                                    replacement_tool_index = tc.index
+                                    tc.function.name = "wait"
+                                    warning_msg = (
+                                        "PROTOCOL VIOLATION: The Mission is NOT marked as DONE in "
+                                        "`central_plan.md`. You cannot finish yet."
+                                    )
+                                    tc.function.arguments = json.dumps({
+                                        "duration": 0.1, "wait_for_new_index": False, "reason": warning_msg
+                                    })
+                                    modified_tool_calls.append(tc)
+                                else:
+                                    modified_tool_calls.append(tc)
                             else:
                                 modified_tool_calls.append(tc)
 
@@ -307,6 +310,15 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
         Logger.debug(f"[Watchdog] End of stream. has_tool_calls={has_tool_calls}")
         if not has_tool_calls:
             call_id = f"call_{uuid.uuid4().hex[:8]}"
+
+            # Workers don't need the Architect monitor loop
+            if not self.is_architect:
+                # Worker produced no tool call — just auto-finish
+                Logger.debug(f"[Watchdog] Worker '{self.agent_name}' produced no tool call. Auto-finishing.")
+                yield create_mock_tool_chunk(call_id, "finish",
+                    json.dumps({"reason": "Auto-finishing: Worker produced no tool call."}))
+                return
+
             mission_status = self._check_mission_status()
             Logger.debug(f"[Watchdog] Mission Status: {mission_status}")
 

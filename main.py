@@ -211,8 +211,8 @@ def main():
         watchdog_guard = WatchdogGuardMiddleware(
             agent_name=args.name,
             blackboard_dir=blackboard_dir,
-            critical_tools=["spawn_swarm_agent"],
-            skip_user_verification=args.evolution
+            skip_user_verification=args.evolution,
+            is_architect=True
         )
 
         # The Watchdog uses the Architect role to design and spawn other agents.
@@ -246,7 +246,7 @@ def main():
         # finish_tool will BLOCK if this hasn't been called first
         if args.evolution:
             watchdog.add_tool(EvolutionWorkspaceTool())
-        
+
         print(f"\n[Launcher] Starting {args.name} ({args.role})")
         print(f"[Launcher] Mission: {mission}\n")
         
@@ -260,7 +260,6 @@ def main():
             watchdog.run(
                 goal=f"The User's Mission is: {mission}",
                 scenario="You are the Root Architect. Analyze the mission, design the blackboard indices, and spawn agents to execute it.",
-                critical_tools=["spawn_swarm_agent"]
             )
     except KeyboardInterrupt:
         print("\n[Launcher] Interrupted by user.")

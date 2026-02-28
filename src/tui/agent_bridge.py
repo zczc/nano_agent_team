@@ -315,8 +315,7 @@ class AgentBridge:
         self._swarm_agent.add_strategy(WatchdogGuardMiddleware(
             agent_name=self.config.swarm_name,
             blackboard_dir=bb_dir,
-            critical_tools=["spawn_swarm_agent"],
-            skip_user_verification=not self.config.use_architect_prompt
+            is_architect=self.config.use_architect_prompt
         ))
         
         self._chat_engine = None
