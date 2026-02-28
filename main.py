@@ -253,8 +253,7 @@ def main():
         if args.evolution:
             watchdog.run(
                 goal=f"The Evolution Mission is:\n{mission}",
-                scenario="You are the Evolution Architect. Follow the evolution protocol strictly.",
-                critical_tools=["spawn_swarm_agent"]
+                scenario="You are the Evolution Architect. Follow the evolution protocol strictly."
             )
         else:
             watchdog.run(
