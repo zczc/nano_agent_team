@@ -8,7 +8,7 @@ from src.core.agent_wrapper import SwarmAgent
 from backend.infra.config import Config
 from backend.tools.web_search import SearchTool
 from backend.tools.web_reader import WebReaderTool
-from src.core.middlewares import RequestMonitorMiddleware, WatchdogGuardMiddleware
+from src.core.middlewares import RequestMonitorMiddleware, ArchitectGuardMiddleware
 from backend.infra.envs.local import LocalEnvironment
 from backend.tools.bash import BashTool
 from backend.tools.write_file import WriteFileTool
@@ -208,11 +208,10 @@ def main():
         
         # Initialize Middleware
         request_monitor = RequestMonitorMiddleware(blackboard_dir)
-        watchdog_guard = WatchdogGuardMiddleware(
+        watchdog_guard = ArchitectGuardMiddleware(
             agent_name=args.name,
             blackboard_dir=blackboard_dir,
-            skip_user_verification=args.evolution,
-            is_architect=True
+            skip_user_verification=args.evolution
         )
 
         # The Watchdog uses the Architect role to design and spawn other agents.

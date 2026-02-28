@@ -33,9 +33,9 @@ from src.tools.spawn_tool import SpawnSwarmAgentTool
 from src.core.prompt_builder import PromptBuilder
 from src.core.runtime import RuntimeManager
 from src.core.middlewares import (
-    WatchdogGuardMiddleware, 
-    DependencyGuardMiddleware, 
-    MailboxMiddleware, 
+    WorkerGuardMiddleware,
+    DependencyGuardMiddleware,
+    MailboxMiddleware,
     SwarmStateMiddleware,
     NotificationAwarenessMiddleware,
     ActivityLoggerMiddleware,
@@ -175,10 +175,12 @@ class SwarmAgent:
 
         print(f"[{self.name}] Starting loop...")
 
-        # Add WatchdogGuardMiddleware for Worker agents if not already present
-        already_has = any(isinstance(s, WatchdogGuardMiddleware) for s in self.engine.strategies)
-        if not already_has:
-            self.engine.strategies.append(WatchdogGuardMiddleware(agent_name=self.name, blackboard_dir=self.blackboard_dir, is_architect=False))
+        # Add WorkerGuardMiddleware for Worker agents — skip if ArchitectGuardMiddleware is already present
+        from src.core.middlewares import ArchitectGuardMiddleware
+        has_architect_guard = any(isinstance(s, ArchitectGuardMiddleware) for s in self.engine.strategies)
+        has_worker_guard = any(isinstance(s, WorkerGuardMiddleware) for s in self.engine.strategies)
+        if not has_architect_guard and not has_worker_guard:
+            self.engine.strategies.append(WorkerGuardMiddleware(agent_name=self.name, blackboard_dir=self.blackboard_dir))
         
         max_engine_retries = 3  # Maximum times to restart the engine on connection errors
         engine_retry_count = 0
