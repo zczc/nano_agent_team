@@ -109,7 +109,8 @@ class SwarmAgent:
             if hasattr(tool, 'configure'):
                 tool.configure({
                     "agent_model": model,
-                    "agent_name": name  # Pass agent name for parent tracking
+                    "agent_name": name,
+                    "is_architect": False  # Workers are not architects; overridden by agent_bridge for Architect
                 })
 
         # Register SIGTERM handler for graceful shutdown (cleanup registry before exit)
@@ -190,28 +191,33 @@ class SwarmAgent:
                     run_limit = self.max_iterations + 20
                     event_generator = self.engine.run(messages, system_config, max_iterations=run_limit)
 
+                    iteration_count = 0
                     while True:
                         try:
                             event = next(event_generator)
                             self.handle_event(event)
+                            if event.type == "tool_call":
+                                iteration_count += 1
 
                             # Check for termination signal
                             if event.type == "tool_result" and event.data.get("name") == "finish":
-                                 print(f"[{self.name}] Detected 'finish' tool call. Stopping loop.")
+                                 print(f"[{self.name}] Detected 'finish' tool call after {iteration_count} tool calls. Stopping loop.")
                                  return  # Normal exit, don't retry
 
                         except StopIteration:
-                            # Check if we reached max_iterations and need cleanup
-                            print(f"[{self.name}] Agent loop completed.")
+                            print(f"[{self.name}] Agent loop completed after {iteration_count} tool calls (max_iterations={self.max_iterations}).")
+                            if iteration_count >= self.max_iterations:
+                                print(f"[{self.name}] WARNING: Agent terminated because max_iterations ({self.max_iterations}) was reached. Tasks may be incomplete.")
                             self._cleanup_on_max_iterations()
                             return  # Normal completion, don't retry
 
                 except KeyboardInterrupt:
-                    print("\n[SwarmAgent] Interrupted by user.")
+                    print(f"\n[{self.name}] Interrupted by user.")
                     return  # User interrupt, don't retry
 
                 except Exception as e:
                     error_msg = str(e).lower()
+                    print(f"[{self.name}] Exception in agent loop: {e}")
 
                     # Check if this is a recoverable connection error
                     is_connection_error = any(keyword in error_msg for keyword in [
