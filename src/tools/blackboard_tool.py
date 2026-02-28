@@ -19,24 +19,41 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 class BlackboardTool(BaseTool):
     """
     Enhanced Blackboard Tool with Semantic Index Directory Support.
-    
+
     Structure:
     - .blackboard/global_indices/: Index files (Markdown + YAML Frontmatter)
     - .blackboard/resources/: Raw content files
     - .blackboard/registry.json: Agent registry
     """
-    
+
+    # Valid status transitions for tasks
+    VALID_STATUS_TRANSITIONS = {
+        "PENDING": {"IN_PROGRESS"},
+        "IN_PROGRESS": {"DONE", "PENDING"},  # PENDING allows un-claiming
+        "BLOCKED": {"PENDING"},               # Only DependencyGuard or Architect can unblock
+        "DONE": set(),                         # DONE is terminal (Architect can override)
+    }
+
     def __init__(self, blackboard_dir: str = ".blackboard", lock_timeout: int = 30):
         super().__init__()
         self.blackboard_dir = blackboard_dir
         self.lock_timeout = lock_timeout
         self.indices_dir = os.path.join(blackboard_dir, "global_indices")
         self.resources_dir = os.path.join(blackboard_dir, "resources")
-        
+        self._agent_name = None
+        self._is_architect = False
+
         os.makedirs(blackboard_dir, exist_ok=True)
         os.makedirs(self.indices_dir, exist_ok=True)
         os.makedirs(self.resources_dir, exist_ok=True)
-    
+
+    def configure(self, context: Dict[str, Any]):
+        """Inject agent identity for access control."""
+        self._agent_name = context.get("agent_name")
+        self._is_architect = context.get("is_architect", False)
+        if not self._is_architect and self._agent_name:
+            self._is_architect = "architect" in self._agent_name.lower()
+
     @property
     def name(self) -> str:
         return "blackboard"
@@ -312,66 +329,105 @@ Operations:
             
         return "Success: Index updated."
 
+    def _validate_status_transition(self, current_status: str, new_status: str, task: Dict, all_tasks: List[Dict]) -> Optional[str]:
+        """Validate that a status transition is legal. Returns error message if invalid, None if OK."""
+        if current_status == new_status:
+            return None
+        if self._is_architect:
+            return None  # Architect can force any transition
+        allowed = self.VALID_STATUS_TRANSITIONS.get(current_status, set())
+        if new_status not in allowed:
+            return (
+                f"Error: Illegal status transition '{current_status}' -> '{new_status}' for Task #{task.get('id')}. "
+                f"Allowed transitions from '{current_status}': {sorted(allowed) if allowed else 'none (terminal state)'}. "
+                f"Only the Architect can override this restriction."
+            )
+        if new_status == "IN_PROGRESS":
+            deps = task.get("dependencies", [])
+            for dep_id in deps:
+                dep_task = next((t for t in all_tasks if t.get("id") == dep_id), None)
+                if dep_task and dep_task.get("status") != "DONE":
+                    return (
+                        f"Error: Cannot claim Task #{task.get('id')} (set IN_PROGRESS) because "
+                        f"dependency Task #{dep_id} is '{dep_task.get('status')}', not DONE."
+                    )
+        return None
+
+    def _validate_assignee_access(self, task: Dict, updates: Dict) -> Optional[str]:
+        """Validate that a non-Architect agent can only update tasks assigned to itself."""
+        if self._is_architect:
+            return None
+        if not self._agent_name:
+            return None
+        current_assignees = task.get("assignees", [])
+        new_assignees = updates.get("assignees")
+        if new_assignees is not None and self._agent_name in new_assignees:
+            return None  # Agent is claiming this task
+        if not current_assignees:
+            return None  # Unassigned task
+        if self._agent_name in current_assignees:
+            return None  # Agent owns this task
+        return (
+            f"Error: Agent '{self._agent_name}' cannot update Task #{task.get('id')} "
+            f"which is assigned to {current_assignees}. "
+            f"Only the assigned agent or the Architect can modify this task."
+        )
+
     def _update_task(self, filename: str, task_id: int, updates: Dict[str, Any], expected_checksum: str) -> str:
-        """
-        Partial update of a task in the specified index file (default: central_plan.md) with CAS.
-        """
+        """Partial update of a task with CAS. Enforces status transitions and assignee access."""
         filename = self._sanitize_index_name(filename)
         fpath = os.path.join(self.indices_dir, filename)
-        
+
         if not os.path.exists(fpath):
             return f"Error: Index '{filename}' not found."
-            
         if not expected_checksum:
             return "Error: expected_checksum is required for update_task."
 
         with file_lock(fpath, 'r+', fcntl.LOCK_EX, timeout=self.lock_timeout) as fd:
             if fd is None: return f"Error: Could not open {filename}"
-            
-            # 1. Read & Verify CAS
+
             content = fd.read()
             current_checksum = hashlib.sha256(content.encode('utf-8')).hexdigest()
-            
             if current_checksum != expected_checksum:
                 return f"Error: CAS Failed. Plan has changed. Current checksum: {current_checksum}"
-            
-            # 2. Parse JSON
+
             meta, body = parse_frontmatter(content)
             try:
-                # Find JSON block
                 json_start = body.find("```json")
                 if json_start == -1: return "Error: No JSON block found in plan."
                 json_end = body.rfind("```")
                 if json_end == -1 or json_end <= json_start: return "Error: Malformed JSON block."
-                
+
                 json_str = body[json_start+7:json_end].strip()
                 plan = json.loads(json_str)
-                
-                # 3. Find & Update Task
                 tasks = plan.get("tasks", [])
                 target_task = next((t for t in tasks if t.get("id") == task_id), None)
-                
                 if not target_task:
                     return f"Error: Task ID {task_id} not found."
-                
-                # Apply updates
+
+                # Validate assignee access
+                access_err = self._validate_assignee_access(target_task, updates)
+                if access_err:
+                    return access_err
+
+                # Validate status transition
+                if "status" in updates:
+                    transition_err = self._validate_status_transition(
+                        target_task.get("status", "PENDING"), updates["status"], target_task, tasks
+                    )
+                    if transition_err:
+                        return transition_err
+
                 for k, v in updates.items():
-                    # Security/Validation could go here (e.g. check allowed fields)
                     target_task[k] = v
-                
-                # 4. Write back
+
                 new_json_str = json.dumps(plan, indent=2, ensure_ascii=False)
                 new_body = body[:json_start+7] + "\n" + new_json_str + "\n" + body[json_end:]
-                
-                # Reconstruct full file
                 if meta:
-                    # width=1000 to prevent unwanted wrapping in long fields (e.g. usage_policy)
-                    # sort_keys=False to preserve order
                     new_content = "---\n" + yaml.dump(meta, sort_keys=False, width=1000) + "---\n" + new_body
                 else:
                     new_content = new_body
-                
-                # Double check the reconstructed content is valid before writing
+
                 try:
                     verify_meta, _ = parse_frontmatter(new_content)
                     if not verify_meta and meta:
@@ -382,9 +438,8 @@ Operations:
                 fd.seek(0)
                 fd.write(new_content)
                 fd.truncate()
-                
                 return "Success: Task updated."
-                
+
             except json.JSONDecodeError:
                 return "Error: Failed to parse Central Plan JSON."
             except Exception as e:

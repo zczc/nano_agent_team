@@ -135,6 +135,7 @@ class AgentEngine:
             }
             if session.tools:
                 kwargs["tools"] = [t.to_openai_schema() for t in session.tools]
+                kwargs["tool_choice"] = "auto"
 
             return self.client.chat.completions.create(**kwargs)
 
@@ -267,12 +268,13 @@ class AgentEngine:
                             delta = chunk.choices[0].delta
                             if delta.tool_calls:
                                 for tc_chunk in delta.tool_calls:
-                                    if len(tool_calls) <= tc_chunk.index:
+                                    idx = tc_chunk.index if tc_chunk.index is not None else 0
+                                    if len(tool_calls) <= idx:
                                         tool_calls.append({"id": tc_chunk.id, "function": {"name": "", "arguments": ""}})
-                                    tc = tool_calls[tc_chunk.index]
+                                    tc = tool_calls[idx]
                                     if tc_chunk.id: tc["id"] = tc_chunk.id
-                                    if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
-                                    if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+                                    if tc_chunk.function and tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
+                                    if tc_chunk.function and tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
                             if delta.content:
                                 full_content += delta.content
                                 yield AgentEvent(type="token", data={"delta": delta.content})

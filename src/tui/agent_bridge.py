@@ -257,14 +257,22 @@ class AgentBridge:
         bb_dir = Config.BLACKBOARD_ROOT
             
         self._swarm_agent = SwarmAgent(
-
             role=swarm_role,
             name=self.config.swarm_name,
             blackboard_dir=bb_dir,
             model=self.config.model_key,
-            max_iterations=self.config.swarm_max_iterations  # Use swarm-specific iterations
+            max_iterations=self.config.swarm_max_iterations
         )
-        
+
+        # Re-configure tools with is_architect flag
+        for tool in self._swarm_agent.tools:
+            if hasattr(tool, 'configure'):
+                tool.configure({
+                    "agent_model": self.config.model_key,
+                    "agent_name": self.config.swarm_name,
+                    "is_architect": self.config.use_architect_prompt
+                })
+
         # Inject input callback into existing AskUserTool if present
         if hasattr(self, '_input_callback') and self._input_callback:
             for tool in self._swarm_agent.tools:
@@ -306,7 +314,8 @@ class AgentBridge:
         self._swarm_agent.add_strategy(WatchdogGuardMiddleware(
             agent_name=self.config.swarm_name,
             blackboard_dir=bb_dir,
-            critical_tools=["spawn_swarm_agent"]
+            critical_tools=["spawn_swarm_agent"],
+            skip_user_verification=not self.config.use_architect_prompt
         ))
         
         self._chat_engine = None

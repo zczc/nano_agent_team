@@ -95,30 +95,35 @@ class LoopBreakerMiddleware(StrategyMiddleware):
         4. Injects warning into system_config if loop detected
     """
     
-    def __init__(self, max_repeats: int = 3):
+    def __init__(self, max_repeats: int = 3, max_same_tool: int = 8):
         """
         Initialize Loop Detection Middleware
-        
+
         Args:
             max_repeats: Max allowed repeats, default 3.
                         Trigger warning when same call appears 3 times.
+            max_same_tool: Max consecutive calls to same tool name (regardless of args), default 8.
+                          Catches varied-arg loops (e.g. web_search with different queries).
         """
         self.max_repeats = max_repeats
+        self.max_same_tool = max_same_tool
 
     def __call__(self, session: AgentSession, next_call: Callable[[AgentSession], Any]) -> Any:
         # We look at the history to find consecutive identical tool calls
         tool_calls_history = []
+        tool_names_history = []
         for msg in reversed(session.history):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
                 # Extract simplified tool call signature: name + args
                 for tc in msg["tool_calls"]:
                     sig = (tc["function"]["name"], tc["function"]["arguments"])
                     tool_calls_history.append(sig)
+                    tool_names_history.append(tc["function"]["name"])
             elif msg.get("role") == "user":
                 # Reset history on new user message if this was a long-running session
                 break
-        
-        # Check for repeats
+
+        # Check 1: Exact duplicate calls (same name + same args)
         if len(tool_calls_history) >= self.max_repeats:
             last_n = tool_calls_history[:self.max_repeats]
             if all(x == last_n[0] for x in last_n):
@@ -128,7 +133,18 @@ class LoopBreakerMiddleware(StrategyMiddleware):
                     f"WARNING: You have attempted to call '{last_n[0][0]}' with the same arguments {self.max_repeats} times consecutively. "
                     "This action is failing to produce a new result. PLEASE CHANGE YOUR STRATEGY or stop this action."
                 )
-        
+
+        # Check 2: Same tool name called repeatedly (even with different args)
+        if len(tool_names_history) >= self.max_same_tool:
+            last_m = tool_names_history[:self.max_same_tool]
+            if all(x == last_m[0] for x in last_m):
+                Logger.error(f"Same-tool loop detected: '{last_m[0]}' called {self.max_same_tool} times consecutively")
+                session.system_config.extra_sections.append(
+                    f"CRITICAL WARNING: You have called '{last_m[0]}' {self.max_same_tool} times consecutively (with varying arguments). "
+                    "This is an unproductive loop. You MUST stop using this tool and try a completely different approach. "
+                    "Consider: using a different tool, synthesizing the information you already have, or moving on to the next step."
+                )
+
         return next_call(session)
 
 class SemanticDriftGuard(StrategyMiddleware):
