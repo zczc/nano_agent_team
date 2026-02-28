@@ -211,7 +211,16 @@ Each agent replaces its `(pending)` section in `research_brief.md` and calls `fi
    - Role: see Tester Agent Role template below
    - Goal: validate all changes in workspace once Task 1 is DONE
    - Instruct to activate and follow the `verify-before-complete` skill
-7. Monitor via `wait` + `check_swarm_status` + reading central_plan until Task 2 DONE
+7. Monitor via `wait` + `check_swarm_status` + reading central_plan until Task 2 DONE.
+
+   **Agent Recovery Protocol (during monitoring):**
+   - Each `wait` cycle, check the REAL-TIME SWARM STATUS in your system prompt.
+   - If a Worker agent shows `status: DEAD` / `verified_status: DEAD` BUT its task is NOT DONE:
+     1. **Immediately** re-spawn a replacement agent with the SAME role and goal.
+     2. Use `update_task` to reset the stuck task's status back to PENDING (clear assignees).
+     3. You may retry **at most once** per agent role per round.
+     4. If the replacement also dies without completing → go to Phase 3.5 Recovery Protocol.
+   - Do NOT wait passively hoping a dead agent will recover — it won't.
 
 ### Phase 3: Judge & Report
 
@@ -270,48 +279,33 @@ Each agent replaces its `(pending)` section in `research_brief.md` and calls `fi
    The tool will return the list of files that were committed. Use this list when writing the evolution report and updating evolution_state.json.
 
 4. Write evolution report:
-   `write_file` → `{{root_path}}/evolution_reports/round_{NNN}_{timestamp}.md`
+   `write_file` → `{{root_path}}/evolution_reports/round_<N>_<timestamp>.md`
+   where `<N>` is the plain round number with NO zero-padding (e.g. `round_1_...`, `round_12_...`, `round_30_...`).
    Include: direction, research, changes, test results, verdict, branch name, integration actions taken
 
    Extract the changed files list from the `evolution_workspace` tool result (it returns "Changed files: ...").
 
-5. Update evolution state — **use `current_round` (N) as the round number**:
-   `read_file` → `{{root_path}}/evolution_state.json`
-   `write_file` → set `"round": N`, add new entry to `"history"` list, keep all existing entries.
+5. Update evolution state — **append ONE line** to `evolution_history.jsonl`:
 
-   Extract the files list from the `evolution_workspace` tool result for the `"files"` field.
+   Use `write_file` with `append=true`. Write exactly ONE line of compact JSON (no pretty-printing, no newlines inside the JSON).
 
-   **PASS entry format** (use ALL fields):
-   ```json
-   {
-     "round": N,
-     "title": "...",
-     "verdict": "PASS",
-     "type": "FEATURE|ENHANCEMENT|BUGFIX|TEST|INTEGRATION",
-     "branch": "evolution/rN-...",
-     "timestamp": "<ISO 8601 UTC>",
-     "files": ["backend/tools/foo.py", "..."],
-     "wired_into": "main.py / tool_registry.py / standalone",
-     "research_hot_topics": "<1-line summary of what Phase 0 Researcher found>",
-     "next_suggestion": "<copy the Next Round Suggestion from the report>"
-   }
+   ```
+   write_file(file_path="{{root_path}}/evolution_history.jsonl", content="<single-line JSON>\n", append=true)
    ```
 
-   **FAIL entry format**:
-   ```json
-   {
-     "round": N,
-     "title": "...",
-     "verdict": "FAIL",
-     "type": "FEATURE|...",
-     "branch": "evolution/rN-...",
-     "timestamp": "<ISO 8601 UTC>",
-     "reason": "<one sentence: root cause of failure>",
-     "files_attempted": ["..."]
-   }
+   **PASS entry** (single line, all fields required):
+   ```
+   {"round":N,"title":"...","verdict":"PASS","type":"FEATURE|ENHANCEMENT|BUGFIX|TEST|INTEGRATION","branch":"evolution/rN-...","timestamp":"<ISO 8601 UTC>","files":["backend/tools/foo.py","..."],"wired_into":"main.py / tool_registry.py / standalone","research_hot_topics":"<1-line summary>","next_suggestion":"<Next Round Suggestion from report>"}
    ```
 
-   Also update the top-level `"last_suggestion"` field with the current round's Next Round Suggestion so the next round sees it immediately without reading reports.
+   **FAIL entry** (single line):
+   ```
+   {"round":N,"title":"...","verdict":"FAIL","type":"FEATURE|...","branch":"evolution/rN-...","timestamp":"<ISO 8601 UTC>","reason":"<one sentence: root cause>","files_attempted":["..."]}
+   ```
+
+   **CRITICAL**: The content MUST be a single line of compact JSON followed by `\n`. Do NOT pretty-print. Do NOT include previous rounds — only THIS round's entry.
+
+   **Do NOT write `evolution_state.json`** — it is managed automatically by the launcher.
 
 6. Update central_plan.md mission status to DONE, then call `finish` to exit.
 
@@ -321,23 +315,31 @@ If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
    (If worktree was never created, the tool will return harmlessly.)
 2. Main worktree branch is unchanged throughout — no `git checkout` needed.
 3. The failed branch (`current_branch` from state.json) is KEPT for post-mortem.
-4. Record failure in evolution_state.json: set `"round": N` (current_round), add FAIL entry to history.
+4. Record failure: append FAIL entry to `evolution_history.jsonl` (append=true, single-line compact JSON).
 5. Write failure report to evolution_reports/.
 6. Update central_plan.md mission status to DONE.
 7. Call `finish` — the next round starts fresh.
 
 ## Supervision & Agent Monitoring
 
-### Dead Agent Detection
+### Dead Agent Detection & Recovery
 - Check the **"REAL-TIME SWARM STATUS (REGISTRY)"** section in your System Prompt each turn.
 - If an agent is `verified_status="DEAD"` or `status="DEAD"`:
-  - Check if it has incomplete tasks (status != DONE)
-  - If critical, restart it with `spawn_swarm_agent`
-  - Reopen its tasks via `update_task`
+  1. Read `central_plan.md` — does the dead agent have an incomplete task (PENDING/IN_PROGRESS/BLOCKED)?
+  2. If YES → **immediately** spawn a replacement:
+     - Same role template, same goal
+     - Reset the task status to PENDING via `update_task`
+     - Track: you may retry **at most 1 time** per agent role per round
+  3. If the replacement ALSO dies → invoke **Phase 3.5 Recovery Protocol** (FAIL the round)
+  4. If NO incomplete tasks → the agent finished successfully, no action needed.
 
 ### Stuck Agent Handling
-- If an agent has no activity for >5 minutes, treat as Dead
-- Kill and respawn if needed
+- If an agent has no activity for >5 minutes, treat as Dead — follow the recovery steps above.
+
+### Deadlock Prevention
+- The system will warn you with escalating "Strike N/3" messages when no agents are running.
+- On Strike 3, you will receive a **DEADLOCK DETECTED** message — you MUST execute Recovery Protocol immediately.
+- Do NOT ignore these warnings or attempt to wait longer.
 
 ### Management Loop
 - Use `wait` (duration ≤ 15s) between monitoring cycles
@@ -371,42 +373,13 @@ If ANYTHING goes wrong (agent crashes, git conflicts, unexpected errors):
 ```
 
 ## Evolution State Protocol
-evolution_state.json format:
-```json
-{
-  "round": 5,
-  "current_round": 5,
-  "current_branch": "evolution/r5-20260226_160000",
-  "base_branch": "evolution/r4-20260226_155000",
-  "last_suggestion": "Consider adding X next round to build on Y",
-  "history": [
-    {
-      "round": 1,
-      "title": "Cost Tracking Middleware",
-      "verdict": "PASS",
-      "type": "FEATURE",
-      "branch": "evolution/r1-20260226_154530",
-      "timestamp": "2026-02-26T15:45:30Z",
-      "files": ["src/core/middlewares/cost_tracker.py", "main.py"],
-      "wired_into": "main.py (Watchdog middleware chain)",
-      "research_hot_topics": "LLM cost visibility, token budget management in production",
-      "next_suggestion": "Add retry middleware for transient API failures"
-    },
-    {
-      "round": 2,
-      "title": "Retry Middleware",
-      "verdict": "FAIL",
-      "type": "FEATURE",
-      "branch": "evolution/r2-20260226_155100",
-      "timestamp": "2026-02-26T15:51:00Z",
-      "reason": "ImportError: pydantic internal module not accessible",
-      "files_attempted": ["src/core/middlewares/retry.py"]
-    }
-  ],
-  "failures": [
-    {"round": 2, "approach": "pydantic internal import", "error": "ImportError"}
-  ]
-}
+
+**`evolution_state.json`** — managed by the launcher. Read-only for you. Contains `current_round`, `current_branch`, `base_branch`, and `history` (assembled from JSONL). **Do NOT write this file.**
+
+**`evolution_history.jsonl`** — append-only log. You append ONE line per round using `write_file(append=true)`:
+```
+{"round":1,"title":"Cost Tracking Middleware","verdict":"PASS","type":"FEATURE","branch":"evolution/r1-20260226_154530","timestamp":"2026-02-26T15:45:30Z","files":["src/core/middlewares/cost_tracker.py","main.py"],"wired_into":"main.py","research_hot_topics":"LLM cost visibility","next_suggestion":"Add retry middleware"}
+{"round":2,"title":"Retry Middleware","verdict":"FAIL","type":"FEATURE","branch":"evolution/r2-20260226_155100","timestamp":"2026-02-26T15:51:00Z","reason":"ImportError: pydantic internal module not accessible","files_attempted":["src/core/middlewares/retry.py"]}
 ```
 
 ## Agent Role Templates
@@ -507,7 +480,7 @@ Consider the full range of improvement types equally — do NOT default to middl
 - An **enhancement** to an existing component's capability
 - An **integration** round that wires up previously-added components
 
-Also read `research_hot_topics` from the last 3 entries in `evolution_state.json` history
+Also read `research_hot_topics` from the last 3 entries in `{{root_path}}/evolution_history.jsonl`
 to avoid recommending directions already explored.
 
 ## Output Format
@@ -570,7 +543,7 @@ Then call `finish`."
 Your job: read the evolution history, check direction diversity, AND check whether previous additions are actually wired into the system.
 
 ## Task
-1. `read_file` → `{{root_path}}/evolution_state.json` — note the `history` array and `type` fields.
+1. `read_file` → `{{root_path}}/evolution_state.json` (metadata) AND `read_file` → `{{root_path}}/evolution_history.jsonl` (full history, one JSON per line — parse each line as a separate entry).
 2. `glob('{{root_path}}/evolution_reports/*.md')` — list all reports.
 3. `read_file` on the 3 most recent reports.
 4. `read_file` → `{{blackboard}}/resources/workspace/docs/system_design.md` — see what's been added and documented.

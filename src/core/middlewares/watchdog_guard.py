@@ -28,12 +28,17 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
     """
     EXECUTION_TOOLS = {"write_file", "edit_file"}
 
+    # After this many consecutive "no agent + mission incomplete" detections,
+    # force the round into Recovery Protocol (FAIL) instead of waiting forever.
+    MAX_NO_AGENT_STRIKES = 3
+
     def __init__(self, agent_name: str = "Assistant", blackboard_dir: str = ".blackboard", critical_tools: List[str] = None, skip_user_verification: bool = False):
         self.agent_name = agent_name
         self.blackboard_dir = blackboard_dir
         self.critical_tools = critical_tools or []
         self.skip_user_verification = skip_user_verification
         self._registry = RegistryManager(blackboard_dir)
+        self._no_agent_strike_count = 0
 
     def _is_anyone_else_running(self) -> bool:
         """
@@ -290,13 +295,53 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                 Logger.debug(f"[Watchdog] Anyone else running: {anyone_else}")
 
                 if anyone_else:
+                    self._no_agent_strike_count = 0  # Reset: agents are alive
                     reason = "MISSION IN PROGRESS: Sub-agents are still working. Waiting for updates."
+                    args = {
+                        "duration": 10,
+                        "wait_for_new_index": True,
+                        "reason": reason
+                    }
+                    yield create_mock_tool_chunk(call_id, "wait", json.dumps(args))
                 else:
-                    reason = "MISSION IN PROGRESS: But no sub-agent is working. Please check the mission status. If the mission is not completed, please create new sub-agent to finish it. If the mission is completed, please update the mission status to DONE."
+                    self._no_agent_strike_count += 1
+                    strikes = self._no_agent_strike_count
+                    Logger.info(f"[Watchdog] No agent running, strike {strikes}/{self.MAX_NO_AGENT_STRIKES}")
 
-                args = {
-                    "duration": 10,
-                    "wait_for_new_index": True,
-                    "reason": reason
-                }
-                yield create_mock_tool_chunk(call_id, "wait", json.dumps(args))
+                    if strikes >= self.MAX_NO_AGENT_STRIKES:
+                        # DEADLOCK BREAKER: force Recovery Protocol
+                        self._no_agent_strike_count = 0  # Reset for next phase
+                        reason = (
+                            "[DEADLOCK DETECTED] No sub-agent has been running for "
+                            f"{strikes} consecutive checks, but the mission is still IN_PROGRESS. "
+                            "This means agent recovery has failed. You MUST now execute "
+                            "Recovery Protocol (Phase 3.5) IMMEDIATELY:\n"
+                            "1. Call evolution_workspace(verdict=\"FAIL\", round_num=N) to discard workspace\n"
+                            "2. Record FAIL in evolution_state.json\n"
+                            "3. Write failure report\n"
+                            "4. Update central_plan.md status to DONE\n"
+                            "5. Call finish\n"
+                            "DO NOT attempt to spawn more agents. This round is over."
+                        )
+                    elif strikes == 1:
+                        reason = (
+                            "MISSION IN PROGRESS: But no sub-agent is working. "
+                            f"(Strike {strikes}/{self.MAX_NO_AGENT_STRIKES}) "
+                            "Check the REAL-TIME SWARM STATUS — if an agent is DEAD with incomplete tasks, "
+                            "spawn a REPLACEMENT agent immediately with the same role and goal. "
+                            "You have 1 retry before this round is force-failed."
+                        )
+                    else:
+                        reason = (
+                            "MISSION IN PROGRESS: Still no sub-agent running. "
+                            f"(Strike {strikes}/{self.MAX_NO_AGENT_STRIKES}) "
+                            "URGENT: If you haven't re-spawned the dead agent yet, do it NOW. "
+                            "Next check will trigger forced FAIL via Recovery Protocol."
+                        )
+
+                    args = {
+                        "duration": 10,
+                        "wait_for_new_index": True,
+                        "reason": reason
+                    }
+                    yield create_mock_tool_chunk(call_id, "wait", json.dumps(args))
