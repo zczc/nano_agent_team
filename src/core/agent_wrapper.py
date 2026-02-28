@@ -149,39 +149,36 @@ class SwarmAgent:
         if self.engine and hasattr(self.engine, 'strategies'):
             self.engine.strategies.append(strategy)
         
-    def run(self, goal: str = "", scenario: str = "", critical_tools: List[str] = None):
+    def run(self, goal: str = "", scenario: str = ""):
         """
         Starts the Agent Loop.
         """
         print(f"[{self.name}] Booting up with role: {self.role}")
         print(f"[{self.name}] Blackboard: {self.blackboard_dir}")
-        
+
         # Dynamic System Prompt
         sys_prompt_content = self.prompt_builder.build(self.role, scenario)
-        
+
         # Resolve path variables in system prompt so LLM knows the actual paths
         sys_prompt_content = sys_prompt_content.replace("{{blackboard}}", os.path.abspath(self.blackboard_dir))
         sys_prompt_content = sys_prompt_content.replace("{{root_path}}", Config.ROOT_PATH)
-        
+
         system_config = SystemPromptConfig(base_prompt=sys_prompt_content)
-        
+
         # Log System Prompt for TUI
         from collections import namedtuple
         Event = namedtuple("Event", ["type", "data"])
         self.handle_event(Event(type="system_prompt", data={"content": sys_prompt_content}))
-        
+
         initial_message = goal if goal else f"Hello {self.role}, please check the Blackboard Indicies and begin your work."
         messages = [{"role": "user", "content": initial_message}]
-        
+
         print(f"[{self.name}] Starting loop...")
-        
-        # Determine strict strategies if this is Watchdog
-        if critical_tools:
-             # Check if already added to avoid duplicates
-             already_has = any(isinstance(s, WatchdogGuardMiddleware) for s in self.engine.strategies)
-             if not already_has:
-                 # Pass critical_tools to middleware
-                 self.engine.strategies.append(WatchdogGuardMiddleware(agent_name=self.name, blackboard_dir=self.blackboard_dir, critical_tools=critical_tools))
+
+        # Add WatchdogGuardMiddleware for Worker agents if not already present
+        already_has = any(isinstance(s, WatchdogGuardMiddleware) for s in self.engine.strategies)
+        if not already_has:
+            self.engine.strategies.append(WatchdogGuardMiddleware(agent_name=self.name, blackboard_dir=self.blackboard_dir, is_architect=False))
         
         max_engine_retries = 3  # Maximum times to restart the engine on connection errors
         engine_retry_count = 0
