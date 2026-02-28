@@ -20,9 +20,10 @@ from backend.llm.types import SystemPromptConfig
 from backend.llm.events import AgentEvent
 from backend.llm.middleware import ExecutionBudgetManager, InteractionRefinementMiddleware
 from src.core.middlewares import (
-    WatchdogGuardMiddleware, 
-    DependencyGuardMiddleware, 
-    MailboxMiddleware, 
+    ArchitectGuardMiddleware,
+    WorkerGuardMiddleware,
+    DependencyGuardMiddleware,
+    MailboxMiddleware,
     SwarmStateMiddleware,
     NotificationAwarenessMiddleware,
     ActivityLoggerMiddleware
@@ -309,13 +310,17 @@ class AgentBridge:
         )
         self._swarm_agent.add_strategy(request_monitor)
         
-        # [FIX] Add WatchdogGuardMiddleware to enforce safety protocols (prevents early exit, non-tool deadlocks)
-        # This aligns TUI Swarm mode with CLI Watchdog behavior.
-        self._swarm_agent.add_strategy(WatchdogGuardMiddleware(
-            agent_name=self.config.swarm_name,
-            blackboard_dir=bb_dir,
-            is_architect=self.config.use_architect_prompt
-        ))
+        # Add role-specific guard middleware
+        if self.config.use_architect_prompt:
+            self._swarm_agent.add_strategy(ArchitectGuardMiddleware(
+                agent_name=self.config.swarm_name,
+                blackboard_dir=bb_dir
+            ))
+        else:
+            self._swarm_agent.add_strategy(WorkerGuardMiddleware(
+                agent_name=self.config.swarm_name,
+                blackboard_dir=bb_dir
+            ))
         
         self._chat_engine = None
     

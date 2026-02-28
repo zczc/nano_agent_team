@@ -252,8 +252,8 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                             else:
                                 modified_tool_calls.append(tc)
 
-                        # Rule C: Unverified Execution
-                        elif tool_name in self.EXECUTION_TOOLS and not has_verified_plan:
+                        # Rule C: Unverified Execution (Architect only — Workers may write freely)
+                        elif self.is_architect and tool_name in self.EXECUTION_TOOLS and not has_verified_plan:
                             replace_mode = True
                             replacement_tool_index = tc.index
                             tc.function.name = "wait"

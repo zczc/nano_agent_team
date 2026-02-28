@@ -286,7 +286,12 @@ Operations:
         """
         filename = self._sanitize_index_name(filename)
         fpath = os.path.join(self.indices_dir, filename)
-        
+
+        # Workers cannot overwrite central_plan.md — only the Architect can
+        if (filename == "central_plan.md" or filename.endswith("/central_plan.md")) and not self._is_architect:
+            return ("Error: Permission denied. Only the Architect can update central_plan.md. "
+                    "Use update_task to modify individual task statuses instead.")
+
         if not os.path.exists(fpath):
             return f"Error: Index '{filename}' not found."
             
