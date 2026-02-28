@@ -1,5 +1,27 @@
 {
   "providers": {
+    "shubiaobiao": {
+      "base_url": "http://api.shubiaobiao.cn/v1",
+      "env": [],
+      "models": [
+        {
+          "name": "gpt-5",
+          "id": "gpt-5"
+        },
+        {
+          "name": "gpt-5.2",
+          "id": "gpt-5-2"
+        },
+        {
+          "name": "gemini-3.1-pro-preview",
+          "id": "gemini-3-1-pro-preview"
+        },
+        {
+          "nam": "kimi-k2.5",
+          "id": "kimi-k2-5"
+        }
+      ]
+    },
     "step": {
       "base_url": "https://api.stepfun.com/v1",
       "env": [
