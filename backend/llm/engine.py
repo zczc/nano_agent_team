@@ -227,7 +227,7 @@ class AgentEngine:
                             "type": "function",
                             "function": {
                                 "name": "activate_skill",
-                                "arguments": json.dumps({"skill_name": s_name})
+                                "arguments": json.dumps({"skill_name": s_name}, ensure_ascii=False)
                             }
                         }]
                     })
@@ -354,7 +354,7 @@ class AgentEngine:
                             "duration": 0.1,
                             "wait_for_new_index": False,
                             "reason": f"Your finish call failed: {error_detail}. Please fix the arguments and call finish again."
-                        })
+                        }, ensure_ascii=False)
                         wait_tool = next((t for t in current_tools if t.name == "wait"), None)
                         if wait_tool:
                             try:

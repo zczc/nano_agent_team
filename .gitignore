@@ -2,4 +2,7 @@
 *.pyc
 logs/
 .blackboard/
-.venv/venv/
+.venv/
+.idea/
+.gitignore
+.agent_cache/

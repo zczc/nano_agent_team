@@ -69,6 +69,13 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
             return False
 
     def _check_mission_status(self) -> str:
+        """
+        Returns one of:
+          "DONE"            — mission.status == DONE
+          "ALL_TASKS_DONE"  — every task is DONE but mission.status is not yet DONE
+          "IN_PROGRESS"     — some tasks still incomplete
+          "UNKNOWN"         — no plan or parse error
+        """
         plan_path = os.path.join(self.blackboard_dir, "global_indices", "central_plan.md")
         if not os.path.exists(plan_path):
             return "UNKNOWN"
@@ -86,10 +93,16 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
             json_str = content[json_start + 7:json_end].strip()
             data = json.loads(json_str)
             tasks = data.get("tasks", [])
+            mission_status = data.get("status", "UNKNOWN")
             if tasks:
-                if not all(t.get("status") == "DONE" for t in tasks):
+                all_done = all(t.get("status") == "DONE" for t in tasks)
+                if not all_done:
                     return "IN_PROGRESS"
-            return data.get("status", "UNKNOWN")
+                # All tasks DONE — check mission-level status
+                if mission_status == "DONE":
+                    return "DONE"
+                return "ALL_TASKS_DONE"
+            return mission_status
         except Exception:
             return "UNKNOWN"
 
@@ -135,21 +148,37 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
     def __call__(self, session: AgentSession, next_call: Callable[[AgentSession], Any]) -> Any:
         mission_status = self._check_mission_status()
 
-        # Dead Agent Detection
+        # Dead Agent Detection — inject as user message for higher visibility
+        dead_agent_tag = "[DEAD AGENT ALERT]"
         if mission_status == "IN_PROGRESS":
             dead_agents = self._get_dead_agents_with_incomplete_tasks()
             if dead_agents:
-                alert_parts = ["[SYSTEM ALERT: DEAD AGENT DETECTED]"]
-                for da in dead_agents:
-                    task_info = ", ".join(
-                        f"Task #{t['id']}({t['status']}): {t['desc']}" for t in da["tasks"])
-                    alert_parts.append(f"  - Agent '{da['name']}' is DEAD with incomplete tasks: {task_info}")
-                alert_parts.append(
-                    "ACTION REQUIRED: Spawn a replacement agent for these tasks or reassign them.")
-                session.system_config.extra_sections.append("\n".join(alert_parts))
+                # Avoid duplicate injection
+                already_alerted = (
+                    session.history and
+                    session.history[-1].get("role") == "user" and
+                    dead_agent_tag in session.history[-1].get("content", "")
+                )
+                if not already_alerted:
+                    alert_parts = [f"### {dead_agent_tag}"]
+                    for da in dead_agents:
+                        task_info = ", ".join(
+                            f"Task #{t['id']}({t['status']}): {t['desc']}" for t in da["tasks"])
+                        alert_parts.append(f"- Agent **{da['name']}** is DEAD with incomplete tasks: {task_info}")
+                    alert_parts.append("")
+                    alert_parts.append("**You MUST perform the following cleanup immediately:**")
+                    alert_parts.append("1. Call `blackboard(operation=\"read_index\", name=\"central_plan.md\")` to get the current checksum.")
+                    alert_parts.append("2. For each incomplete task of the dead agent, call "
+                                       "`blackboard(operation=\"update_task\", task_id=X, updates={\"status\": \"PENDING\", \"assignees\": []}, expected_checksum=\"...\")` "
+                                       "to reset it.")
+                    alert_parts.append("3. Call `spawn_swarm_agent(name=\"...\", role=\"...\")` to launch a replacement Worker.")
+                    alert_parts.append("4. Continue monitoring until the replacement agent completes the tasks.")
+                    alert_parts.append("")
+                    alert_parts.append("Do NOT ignore this alert. Do NOT call `finish` until all tasks are DONE.")
+                    session.history.append({"role": "user", "content": "\n".join(alert_parts)})
 
-        # Persistence Guard
-        if mission_status != "DONE" and mission_status != "UNKNOWN":
+        # Persistence Guard (only when tasks are still incomplete)
+        if mission_status == "IN_PROGRESS":
             current_turn = sum(1 for msg in session.history if msg["role"] == "assistant")
             last_injection_turn = -1
             persistence_tag = "[SYSTEM INTERVENTION: PERSISTENCE GUARD]"
@@ -203,6 +232,19 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                 if msg.get("metadata", {}).get("from_tool_call") == "ask_user":
                     has_verified_plan = True
 
+        # Recovery scenario: if other agents already exist in registry,
+        # the plan was previously verified — skip re-verification for respawns
+        if not has_verified_plan:
+            try:
+                registry = self._registry.read()
+                for name in registry:
+                    if name != self.agent_name:
+                        has_verified_plan = True
+                        Logger.debug(f"[ArchitectGuard] Recovery mode: agent '{name}' found in registry, skipping ask_user requirement")
+                        break
+            except Exception:
+                pass
+
         has_tool_calls = False
         replace_mode = False
         replacement_tool_index = -1
@@ -241,10 +283,12 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                                 tc.function.name = "wait"
                                 tc.function.arguments = json.dumps({
                                     "duration": 0.5, "wait_for_new_index": False,
-                                    "reason": "[SYSTEM WARNING] PLAN VIOLATION: You attempted to spawn agents "
-                                              "but central_plan.md does not exist yet. Required order: "
-                                              "create_index(central_plan.md) -> ask_user -> spawn_swarm_agent."
-                                })
+                                    "reason": "[PLAN VIOLATION] `spawn_swarm_agent` blocked — `central_plan.md` does not exist yet.\n"
+                                              "Required order:\n"
+                                              "1. Call `blackboard(operation=\"create_index\", name=\"central_plan.md\", content=\"...\")` to create the plan.\n"
+                                              "2. Call `ask_user(question=\"...\")` to get user approval.\n"
+                                              "3. Then call `spawn_swarm_agent(...)` to launch Workers."
+                                }, ensure_ascii=False)
                                 modified_tool_calls.append(tc)
 
                             elif not has_verified_plan:
@@ -253,10 +297,10 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                                 tc.function.name = "wait"
                                 tc.function.arguments = json.dumps({
                                     "duration": 0.5, "wait_for_new_index": False,
-                                    "reason": "[SYSTEM WARNING] PLAN VIOLATION: central_plan.md exists but "
-                                              "you must call ask_user for approval first. Required order: "
-                                              "create_index(central_plan.md) -> ask_user -> spawn_swarm_agent."
-                                })
+                                    "reason": "[PLAN VIOLATION] `spawn_swarm_agent` blocked — plan exists but not yet approved by user.\n"
+                                              "You must call `ask_user(question=\"...\")` to confirm your plan first, "
+                                              "then call `spawn_swarm_agent(...)` to launch Workers."
+                                }, ensure_ascii=False)
                                 modified_tool_calls.append(tc)
 
                             else:
@@ -270,14 +314,14 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                             tc.function.name = "wait"
                             tc.function.arguments = json.dumps({
                                 "duration": 0.5, "wait_for_new_index": False,
-                                "reason": f"[SYSTEM WARNING] EXECUTION VIOLATION: You are the Architect and "
-                                          f"attempted to execute work directly via '{tool_name}'. "
-                                          "Architect should delegate work to Workers via spawn_swarm_agent, "
-                                          "not execute it directly."
-                            })
+                                "reason": f"[EXECUTION VIOLATION] `{tool_name}` blocked — Architect must not execute work directly.\n"
+                                          "Delegate to Workers instead:\n"
+                                          "1. Call `spawn_swarm_agent(name=\"...\", role=\"...\")` to launch a Worker.\n"
+                                          "2. The Worker will pick up tasks from `central_plan.md` and execute them."
+                            }, ensure_ascii=False)
                             modified_tool_calls.append(tc)
 
-                        # Rule B: Finish blocked while mission IN_PROGRESS
+                        # Rule B: Finish blocked while tasks still incomplete
                         elif tool_name == "finish":
                             mission_status = self._check_mission_status()
                             if mission_status == "IN_PROGRESS":
@@ -286,11 +330,14 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                                 tc.function.name = "wait"
                                 tc.function.arguments = json.dumps({
                                     "duration": 0.5, "wait_for_new_index": False,
-                                    "reason": "PROTOCOL VIOLATION: The Mission is NOT marked as DONE in "
-                                              "`central_plan.md`. You cannot finish yet."
-                                })
+                                    "reason": "[PROTOCOL VIOLATION] Cannot call `finish` — some tasks in "
+                                              "`central_plan.md` are NOT yet DONE. "
+                                              "Use `blackboard(operation=\"read_index\", name=\"central_plan.md\")` "
+                                              "to check current task statuses, then continue monitoring."
+                                }, ensure_ascii=False)
                                 modified_tool_calls.append(tc)
                             else:
+                                # DONE or ALL_TASKS_DONE — allow finish
                                 modified_tool_calls.append(tc)
 
                         else:
@@ -324,19 +371,35 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
             if mission_status == "DONE":
                 Logger.debug("[ArchitectGuard] Auto-finishing (DONE)")
                 yield create_mock_tool_chunk(call_id, "finish",
-                    json.dumps({"reason": "Auto-finishing as Mission Status is DONE."}))
+                    json.dumps({"reason": "Auto-finishing as Mission Status is DONE."}, ensure_ascii=False))
 
-            # 2. Plan not verified → remind protocol
+            # 2. All tasks DONE but mission not marked → prompt Architect to close out
+            elif mission_status == "ALL_TASKS_DONE":
+                Logger.info("[ArchitectGuard] All tasks DONE, prompting mission closure.")
+                yield create_mock_tool_chunk(call_id, "wait", json.dumps({
+                    "duration": 0.5, "wait_for_new_index": False,
+                    "reason": "[ALL TASKS COMPLETED] Every task in `central_plan.md` is now DONE. "
+                              "You MUST finalize the mission immediately:\n"
+                              "1. Call `blackboard(operation=\"update_index\", name=\"central_plan.md\", ...)` "
+                              "to set the mission `status` to `\"DONE\"`.\n"
+                              "2. Then call `finish(reason=\"Mission complete.\")` to exit.\n"
+                              "Do NOT spawn more agents or wait — just close the mission."
+                }, ensure_ascii=False))
+
+            # 3. Plan not verified → remind protocol
             elif not has_verified_plan:
                 Logger.info(f"[{self.agent_name}] Guard: No tool call, plan not verified. Injecting wait.")
                 yield create_mock_tool_chunk(call_id, "wait", json.dumps({
                     "duration": 0.5, "wait_for_new_index": False,
                     "reason": "[PROTOCOL REMINDER] You produced no action this turn. "
-                              "Please follow the protocol: create central_plan.md -> "
-                              "call ask_user to confirm your plan -> spawn Workers to execute."
-                }))
+                              "Please follow the protocol:\n"
+                              "1. Call `blackboard(operation=\"create_index\", name=\"central_plan.md\", ...)` to create the plan.\n"
+                              "2. Call `ask_user(question=\"...\")` to confirm your plan with the user.\n"
+                              "3. Call `spawn_swarm_agent(...)` to launch Workers.\n"
+                              "You must complete these steps in order."
+                }, ensure_ascii=False))
 
-            # 3/4. Mission in progress — monitor loop
+            # 4. Mission in progress — monitor loop
             else:
                 anyone_else = self._is_anyone_else_running()
                 Logger.debug(f"[ArchitectGuard] Anyone else running: {anyone_else}")
@@ -345,8 +408,10 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                     self._no_agent_strike_count = 0
                     yield create_mock_tool_chunk(call_id, "wait", json.dumps({
                         "duration": 30, "wait_for_new_index": True,
-                        "reason": "MISSION IN PROGRESS: Sub-agents are still working. Waiting for updates."
-                    }))
+                        "reason": "Sub-agents are still working. Waiting for blackboard updates. "
+                                  "After waking, call `blackboard(operation=\"read_index\", name=\"central_plan.md\")` "
+                                  "to check task progress."
+                    }, ensure_ascii=False))
                 else:
                     self._no_agent_strike_count += 1
                     strikes = self._no_agent_strike_count
@@ -356,28 +421,31 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                         self._no_agent_strike_count = 0
                         reason = (
                             f"[DEADLOCK DETECTED] No sub-agent has been running for "
-                            f"{strikes} consecutive checks, but the mission is still IN_PROGRESS. "
-                            "You MUST now take recovery action:\n"
-                            "1. Check which agents are DEAD with incomplete tasks\n"
-                            "2. Either spawn replacements or update central_plan.md status to DONE\n"
-                            "3. Call finish when done\n"
-                            "DO NOT just wait again."
+                            f"{strikes} consecutive checks, but tasks are still incomplete.\n"
+                            "You MUST take recovery action NOW:\n"
+                            "1. Call `blackboard(operation=\"read_index\", name=\"central_plan.md\")` to check task statuses.\n"
+                            "2. For each incomplete task of a DEAD agent, call "
+                            "`blackboard(operation=\"update_task\", task_id=X, updates={{\"status\": \"PENDING\", \"assignees\": []}})` to reset it.\n"
+                            "3. Call `spawn_swarm_agent(...)` to launch a replacement Worker.\n"
+                            "4. If all tasks are actually DONE, update mission status to DONE and call `finish(reason=\"...\")` to exit.\n"
+                            "DO NOT just call `wait` again."
                         )
                     elif strikes == 1:
                         reason = (
-                            "MISSION IN PROGRESS: But no sub-agent is working. "
-                            f"(Strike {strikes}/{self.MAX_NO_AGENT_STRIKES}) "
-                            "Check REAL-TIME SWARM STATUS — if an agent is DEAD with incomplete tasks, "
-                            "spawn a REPLACEMENT agent immediately."
+                            f"No sub-agent is working. (Strike {strikes}/{self.MAX_NO_AGENT_STRIKES})\n"
+                            "Action required:\n"
+                            "1. Check the REAL-TIME SWARM STATUS for DEAD agents.\n"
+                            "2. Call `blackboard(operation=\"read_index\", name=\"central_plan.md\")` to check incomplete tasks.\n"
+                            "3. If a DEAD agent has incomplete tasks, call `spawn_swarm_agent(...)` to launch a replacement."
                         )
                     else:
                         reason = (
-                            "MISSION IN PROGRESS: Still no sub-agent running. "
-                            f"(Strike {strikes}/{self.MAX_NO_AGENT_STRIKES}) "
-                            "URGENT: Re-spawn the dead agent NOW. "
-                            "Next check will trigger forced recovery."
+                            f"Still no sub-agent running. (Strike {strikes}/{self.MAX_NO_AGENT_STRIKES})\n"
+                            "URGENT: You must act now or a forced recovery will trigger on next check.\n"
+                            "Call `spawn_swarm_agent(...)` to re-spawn the dead agent, "
+                            "or call `blackboard(operation=\"read_index\", name=\"central_plan.md\")` to re-assess."
                         )
 
                     yield create_mock_tool_chunk(call_id, "wait", json.dumps({
                         "duration": 30, "wait_for_new_index": True, "reason": reason
-                    }))
+                    }, ensure_ascii=False))

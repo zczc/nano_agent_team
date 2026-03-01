@@ -47,4 +47,4 @@ class SwarmAgentGuardMiddleware(StrategyMiddleware):
                 "reason": reason
             }
 
-            yield create_mock_tool_chunk(call_id, "wait", json.dumps(args))
+            yield create_mock_tool_chunk(call_id, "wait", json.dumps(args, ensure_ascii=False))
