@@ -342,9 +342,14 @@ Operations:
             return None  # Architect can force any transition
         allowed = self.VALID_STATUS_TRANSITIONS.get(current_status, set())
         if new_status not in allowed:
+            hint = ""
+            if current_status == "PENDING" and new_status == "DONE":
+                hint = " You must first set status to 'IN_PROGRESS' (claim the task), then set to 'DONE' after completing the work."
+            elif current_status == "BLOCKED":
+                hint = " BLOCKED tasks will auto-unblock to PENDING when their dependencies are DONE. Wait for dependencies to complete first."
             return (
                 f"Error: Illegal status transition '{current_status}' -> '{new_status}' for Task #{task.get('id')}. "
-                f"Allowed transitions from '{current_status}': {sorted(allowed) if allowed else 'none (terminal state)'}. "
+                f"Allowed transitions from '{current_status}': {sorted(allowed) if allowed else 'none (terminal state)'}.{hint} "
                 f"Only the Architect can override this restriction."
             )
         if new_status == "IN_PROGRESS":
@@ -409,6 +414,24 @@ Operations:
                 target_task = next((t for t in tasks if t.get("id") == task_id), None)
                 if not target_task:
                     return f"Error: Task ID {task_id} not found."
+
+                # ---- Step 1: assignee normalization & new-assignee constraint ----
+                if not self._is_architect and "assignees" in updates and self._agent_name:
+                    added_assignees = set(updates["assignees"]) - set(target_task.get("assignees", []))
+                    deleted_assignees = set(target_task.get("assignees", [])) - set(updates["assignees"])
+                    if len(deleted_assignees) > 0:
+                        return f"Error: Agent '{self._agent_name}' cannot remove other agents from assignees."
+                    if len(added_assignees) > 1:
+                        return f"Error: Agent '{self._agent_name}' cannot add other agents to assignees."
+                    if len(added_assignees) == 1 and self._agent_name not in added_assignees:
+                        return f"Error: Agent '{self._agent_name}' can only update itself or add itself to assignees."
+
+                # ---- Step 2: claim auto-triggers IN_PROGRESS ----
+                if not self._is_architect and "assignees" in updates:
+                    added_assignees = set(updates["assignees"]) - set(target_task.get("assignees", []))
+                    current_status = target_task.get("status", "PENDING")
+                    if current_status == "PENDING" and "status" not in updates and self._agent_name in added_assignees:
+                        updates["status"] = "IN_PROGRESS"
 
                 # Validate assignee access
                 access_err = self._validate_assignee_access(target_task, updates)
