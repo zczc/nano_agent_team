@@ -258,11 +258,13 @@ class AgentEngine:
                 # happen during iteration, outside middleware scope. Retry here and
                 # re-invoke pipeline (which passes through the full middleware chain).
                 full_content = ""
+                reasoning_content = ""
                 tool_calls = []
                 for stream_attempt in range(3):  # max 3 attempts (1 initial + 2 retries)
                     try:
                         stream = pipeline(session)
                         full_content = ""
+                        reasoning_content = ""
                         tool_calls = []
                         for chunk in stream:
                             delta = chunk.choices[0].delta
@@ -278,6 +280,10 @@ class AgentEngine:
                             if delta.content:
                                 full_content += delta.content
                                 yield AgentEvent(type="token", data={"delta": delta.content})
+                            # DeepSeek Reasoner: capture reasoning_content from stream
+                            rc = getattr(delta, "reasoning_content", None)
+                            if rc:
+                                reasoning_content += rc
                         break  # stream consumed successfully
                     except Exception as e:
                         if stream_attempt < 2:
@@ -296,21 +302,27 @@ class AgentEngine:
                         full_content += citation_text
                         yield AgentEvent(type="token", data={"delta": citation_text})
 
-                    session.history.append({"role": "assistant", "content": full_content})
+                    msg = {"role": "assistant", "content": full_content}
+                    if reasoning_content:
+                        msg["reasoning_content"] = reasoning_content
+                    session.history.append(msg)
                     yield AgentEvent(type="message", data=session.history[-1])
 
                     if on_step_log: on_step_log("assistant_response", content=full_content)
                     break
 
-                session.history.append({
-                    "role": "assistant", 
-                    "content": full_content or None, 
+                msg = {
+                    "role": "assistant",
+                    "content": full_content or None,
                     "tool_calls": [{
                         "id": tc["id"],
                         "type": "function",
                         "function": tc["function"]
                     } for tc in tool_calls]
-                })
+                }
+                if reasoning_content:
+                    msg["reasoning_content"] = reasoning_content
+                session.history.append(msg)
                 yield AgentEvent(type="message", data=session.history[-1])
 
                 if on_step_log: on_step_log("tool_call_request", tool_calls=tool_calls, assistant_content=full_content)
