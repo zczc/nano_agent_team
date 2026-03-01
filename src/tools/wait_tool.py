@@ -43,7 +43,7 @@ Use this when you are waiting for other agents to reply or post tasks.
                 "duration": {
                     "type": "number",
                     "default": 15,
-                    "description": "Maximum wait time in seconds (strictly ≤ 15s)."
+                    "description": "Maximum wait time in seconds (≤ 60s)."
                 },
                 "wait_for_new_index": {
                     "type": "boolean",
