@@ -17,7 +17,8 @@ from backend.llm.decorators import schema_strict_validator
 from backend.infra.config import Config
 from backend.utils.logger import Logger
 
-MAX_RESPONSE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_RESPONSE_SIZE = 5 * 1024 * 1024   # 5MB — hard cap (reject)
+TRUNCATE_THRESHOLD = 1 * 1024 * 1024  # 1MB — truncation target for oversized pages
 DEFAULT_TIMEOUT = 30
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -130,24 +131,32 @@ class WebReaderTool(BaseTool):
 
             resp.raise_for_status()
 
-            # 检查大小
-            cl = resp.headers.get("content-length")
-            if cl and int(cl) > MAX_RESPONSE_SIZE:
-                return f"Error: Response too large ({cl} bytes, limit {MAX_RESPONSE_SIZE})"
-
+            # 检查大小 — 超大响应先截断 HTML 再转换，而非硬拒绝
             content = resp.text
-            if len(content.encode("utf-8", errors="ignore")) > MAX_RESPONSE_SIZE:
-                return "Error: Response body exceeds 5MB limit"
-
             content_type = resp.headers.get("content-type", "")
             is_html = "text/html" in content_type or "xhtml" in content_type
+            truncated = False
+
+            content_size = len(content.encode("utf-8", errors="ignore"))
+            if content_size > MAX_RESPONSE_SIZE:
+                # 截断原始 HTML/text 到 TRUNCATE_THRESHOLD
+                content = content[:TRUNCATE_THRESHOLD]
+                truncated = True
+                Logger.info(f"[WebReader] Response truncated from {content_size} to ~{TRUNCATE_THRESHOLD} bytes")
 
             if format == "html":
-                return content
+                result = content
             elif format == "text":
-                return _extract_text(content) if is_html else content
+                result = _extract_text(content) if is_html else content
             else:  # markdown (default)
-                return _html_to_markdown(content) if is_html else content
+                result = _html_to_markdown(content) if is_html else content
+
+            if truncated:
+                result = (f"[NOTE: Page content was truncated from {content_size // 1024}KB "
+                          f"to ~{TRUNCATE_THRESHOLD // 1024}KB due to size limit. "
+                          f"The content below may be incomplete.]\n\n{result}")
+
+            return result
 
         except requests.exceptions.Timeout:
             return f"Error: Request timed out after {DEFAULT_TIMEOUT}s"

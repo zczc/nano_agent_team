@@ -107,7 +107,7 @@ class WorkerGuardMiddleware(StrategyMiddleware):
                                 "reason": "[SYSTEM WARNING] SPAWN VIOLATION: Workers cannot spawn "
                                           "other agents. Only the Architect can use spawn_swarm_agent. "
                                           "Focus on completing your assigned tasks."
-                            })
+                            }, ensure_ascii=False)
                             modified_tool_calls.append(tc)
 
                         # Rule B: Finish gate — check for incomplete tasks
@@ -126,7 +126,7 @@ class WorkerGuardMiddleware(StrategyMiddleware):
                                     "reason": f"[FINISH BLOCKED] You still have IN_PROGRESS tasks: "
                                               f"{task_info}. Complete your assigned tasks and update "
                                               f"their status via update_task before finishing."
-                                })
+                                }, ensure_ascii=False)
                                 modified_tool_calls.append(tc)
                             else:
                                 modified_tool_calls.append(tc)
@@ -168,8 +168,8 @@ class WorkerGuardMiddleware(StrategyMiddleware):
                     "reason": f"[TASK INCOMPLETE] You produced no action this turn but still have "
                               f"IN_PROGRESS tasks: {task_info}. "
                               f"Complete your work and update task status via update_task."
-                }))
+                }, ensure_ascii=False))
             else:
                 Logger.debug(f"[WorkerGuard] Worker '{self.agent_name}' has no incomplete tasks. Auto-finishing.")
                 yield create_mock_tool_chunk(call_id, "finish",
-                    json.dumps({"reason": "Auto-finishing: Worker has no remaining IN_PROGRESS tasks."}))
+                    json.dumps({"reason": "Auto-finishing: Worker has no remaining IN_PROGRESS tasks."}, ensure_ascii=False))

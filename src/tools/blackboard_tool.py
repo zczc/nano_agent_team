@@ -399,7 +399,9 @@ Operations:
             content = fd.read()
             current_checksum = hashlib.sha256(content.encode('utf-8')).hexdigest()
             if current_checksum != expected_checksum:
-                return f"Error: CAS Failed. Plan has changed. Current checksum: {current_checksum}"
+                return (f"Error: CAS Failed. Plan has changed. Current checksum: {current_checksum}. "
+                        f"To retry: call `blackboard(operation=\"read_index\", name=\"{filename}\")` "
+                        f"to get the new checksum, then re-submit your update_task with the fresh checksum.")
 
             meta, body = parse_frontmatter(content)
             try:

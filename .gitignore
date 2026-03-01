@@ -4,4 +4,6 @@ __pycache__/
 logs/
 .blackboard/
 .venv/
+.idea/
+.gitignore
 .agent_cache/
