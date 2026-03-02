@@ -109,7 +109,7 @@ class FinishTool(BaseTool):
                         f"{task_list}{more}\n\n"
                         "As the Architect, you MUST ensure all tasks are DONE before calling finish.\n\n"
                         "Options:\n"
-                        "- Wait for Workers to complete tasks (use check_swarm_status or wait tool)\n"
+                        "- Wait for Workers to complete tasks (use the wait tool and registry status)\n"
                         "- Spawn new Workers for PENDING tasks (use spawn_swarm_agent)\n"
                         "- Mark tasks as DONE if they are actually complete (use blackboard update_task)\n"
                         "- Update task status to reflect reality if needed\n\n"
@@ -146,5 +146,4 @@ class FinishTool(BaseTool):
             return None
 
         return None
-
 

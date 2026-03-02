@@ -141,7 +141,7 @@ class SpawnSwarmAgentTool(BaseTool):
                     start_new_session=True, # 创建新进程组，便于整组清理（含 browser-use 等子进程）
                 )
 
-                # IMPORTANT: Write PID to log for status_tool tracking
+                # IMPORTANT: Write PID to log for registry/process tracking
                 log_f.write(f"PID: {proc.pid}\n")
                 log_f.flush()
 

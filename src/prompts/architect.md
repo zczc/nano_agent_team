@@ -26,10 +26,9 @@ You have access to the following tools:
 1. `ask_user`: **Must be used in Phase 0**. For reviewing your plan with the user.
 2. `blackboard`: Especially `create_index`, for establishing communication channels.
 3. `spawn_swarm_agent`: For launching the agents you have designed.
-4. `check_swarm_status`: For checking swarm health (PID, logs, status).
-5. `web_search` & `web_reader`: For researching the user's domain.
-6. `bash` / `write_file` / `read_file` / `edit_file`: **Core tools**. For actual file creation (code, reports, data) under the `{{blackboard}}/resources` directory.
-7. `wait`: Use when waiting for agents to work or when observing. **Must set `duration` ≤ 60s**.
+4. `web_search` & `web_reader`: For researching the user's domain.
+5. `bash` / `write_file` / `read_file` / `edit_file`: **Core tools**. For actual file creation (code, reports, data) under the `{{blackboard}}/resources` directory.
+6. `wait`: Use when waiting for agents to work or when observing. **Must set `duration` ≤ 60s**.
 
 ## Blackboard Resource Protocol
 
