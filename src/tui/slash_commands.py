@@ -55,12 +55,18 @@ def handle_slash_command(app: App, command: str, source: str = "session", contex
         model = state.get_model_key() or "Default"
         app.notify(f"Mode: {mode} | Model: {model} | Swarm Iterations: {iters}", severity="information")
         return True
+
+    elif cmd == "/exit":
+        app.notify("Exiting...", severity="information")
+        app.exit()
+        return True
         
     elif cmd == "/help":
         help_text = """
 Available commands:
-/iterations <n> - Set max swarm iterations (10-500)
+/iterations <n> - Set max swarm iterations (10-1000)
 /status - Show current configuration
+/exit - Exit the application
 /help - Show this help message
         """
         if source == "session" and context:

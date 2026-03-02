@@ -525,34 +525,8 @@ class AgentMonitorScreen(Screen):
         except Exception:
             pass  # Input widget may not be ready
         
-        # Clear and Fill Trajectory (Windowed: Last N)
-        try:
-            scroll = self.query_one("#trajectory-scroll", VerticalScroll)
-            scroll.query("*").remove()
-            self.trajectory_widget_count = 0
-            self._has_omitted_hint = False
-            
-            all_entries = self.agent_entries.get(stripped_name, [])
-            display_entries = all_entries[-MAX_TRAJECTORY_WIDGETS:]
-            
-            if len(all_entries) > MAX_TRAJECTORY_WIDGETS:
-                scroll.mount(Static("... (Earlier history omitted)", classes="omitted-hint"))
-                self._has_omitted_hint = True
-            
-            for entry in display_entries:
-                try:
-                    scroll.mount(TrajectoryItem(
-                        entry["type"], 
-                        entry["content"], 
-                        entry["timestamp"]
-                    ))
-                    self.trajectory_widget_count += 1
-                except Exception as e:
-                    Logger.error(f"[Monitor] Failed to mount trajectory item: {e}")
-            
-            scroll.scroll_end(animate=False)
-        except Exception as e:
-            Logger.error(f"[Monitor] Failed to refresh trajectory for {stripped_name}: {e}")
+        # Rebuild Trajectory from cache
+        self._rebuild_trajectory(stripped_name)
         
         # Update Role from cache (falls back to empty if not found)
         try:
@@ -562,141 +536,138 @@ class AgentMonitorScreen(Screen):
             pass  # Markdown widget may not be ready
 
     def process_log_batch(self, agent_name: str, lines: List[str]):
-        Logger.info(f"[Monitor] Processing batch for {agent_name}: {len(lines)} lines")
+        """Process a batch of log lines: update cache first, then rebuild UI once."""
+        agent_name = agent_name.strip()
+        if agent_name not in self.agent_entries:
+            self.agent_entries[agent_name] = []
+
+        had_new_items = False
+        role_updated = False
+
         for line in lines:
-            self.process_log_line(agent_name, line)
+            try:
+                if not line.strip():
+                    continue
+                entry = json.loads(line)
+                evt_type = entry.get("type")
+                data = entry.get("data")
+                timestamp = entry.get("timestamp", time.time())
 
-    def process_log_line(self, agent_name: str, line: str):
-        try:
-            if not line.strip(): return
-            entry = json.loads(line)
-            evt_type = entry.get("type")
-            data = entry.get("data")
-            timestamp = entry.get("timestamp", time.time())
-            
-            agent_name = agent_name.strip()
-            # 0. Cache for memory-based fast switching
-            if agent_name not in self.agent_entries:
-                self.agent_entries[agent_name] = []
+                # Role extraction (cache only)
+                if evt_type == "system_prompt":
+                    content = data.get("content", "")
+                    role_text = ""
+                    for marker in ["# YOUR ROLE", "# 角色"]:
+                        if marker in content:
+                            role_text = content.split(marker)[-1].strip()
+                            stop_markers = [
+                                "\n**行为协议**", "\n**Behavior Protocol**",
+                                "\n**PROTOCOL**", "\n##", "\n#"
+                            ]
+                            for stop_marker in stop_markers:
+                                if stop_marker in role_text:
+                                    role_text = role_text.split(stop_marker)[0].strip()
+                            break
+                    if not role_text:
+                        role_text = content[:500] + "..." if len(content) > 500 else content
+                    self.agent_roles[agent_name] = role_text
+                    role_updated = True
+                    continue
 
-            # 1. Role Extraction (Cache and Update Widget if active)
-            if evt_type == "system_prompt":
-                content = data.get("content", "")
-                role_text = ""
-                for marker in ["# YOUR ROLE", "# 角色"]:
-                    if marker in content:
-                        role_text = content.split(marker)[-1].strip()
-                        stop_markers = [
-                            "\n**行为协议**", "\n**Behavior Protocol**",
-                            "\n**PROTOCOL**", "\n##", "\n#"
-                        ]
-                        for stop_marker in stop_markers:
-                            if stop_marker in role_text:
-                                role_text = role_text.split(stop_marker)[0].strip()
-                        break
-                
-                if not role_text:
-                    role_text = content[:500] + "..." if len(content) > 500 else content
-
-                self.agent_roles[agent_name] = role_text
-                if self.selected_agent == agent_name:
-                    self.query_one("#role-display", Markdown).update(role_text)
-                return
-
-            # 2. Build Entry Data with Truncation (200 chars)
-            new_items = []
-            def get_truncated(text: str) -> str:
-                if len(text) > 200:
-                    return text[:200] + "..."
-                return text
-
-            if evt_type == "message":
-                # Only extract thought content from message events.
-                # tool_calls are handled by the dedicated 'tool_call' event to avoid duplication.
-                msg_content = data.get("content", "")
-                if msg_content:
-                    new_items.append({"type": "thought", "content": get_truncated(msg_content), "timestamp": timestamp})
-
-            elif evt_type == "tool_call":
-                calls = data.get("tool_calls", [])
-                for call in calls:
-                    fn = call.get("function", {})
-                    call_text = f"Call: {fn.get('name')}({fn.get('arguments')})"
-                    new_items.append({"type": "tool_call", "content": get_truncated(call_text), "timestamp": timestamp})
-
-            elif evt_type == "tool_result":
-                result = data.get("result", "")
-                new_items.append({"type": "tool_result", "content": get_truncated(result), "timestamp": timestamp})
-
-            elif evt_type == "intervention":
-                new_items.append({"type": "intervention", "content": get_truncated(data.get("content", "")), "timestamp": timestamp})
-
-            elif evt_type == "lifecycle":
-                evt = data.get("event", "")
-                reason = data.get("reason", "")
-                new_items.append({"type": "lifecycle", "content": f"{evt}: {reason}", "timestamp": timestamp})
-
-            elif evt_type == "error":
-                new_items.append({"type": "error", "content": get_truncated(data.get("error", "Unknown Error")), "timestamp": timestamp})
-
-            # 3. Commit to Cache
-            # Only update UI if this agent is currently selected
-            is_active = (self.selected_agent == agent_name)
-
-            for item_data in new_items:
-                self.agent_entries[agent_name].append(item_data)
+                # Parse entry into display items
+                new_items = self._parse_log_entry(evt_type, data, timestamp)
+                for item_data in new_items:
+                    self.agent_entries[agent_name].append(item_data)
+                    had_new_items = True
 
                 # Cap in-memory cache per agent
                 entries = self.agent_entries[agent_name]
                 if len(entries) > MAX_CACHED_ENTRIES:
                     self.agent_entries[agent_name] = entries[-MAX_CACHED_ENTRIES:]
 
-                # Skip UI update for non-active agents (only cache)
-                if not is_active:
-                    continue
+            except Exception as e:
+                Logger.error(f"[Monitor] Error processing log line: {e}")
 
-                # Only update UI for selected agent
+        # Single UI rebuild for the active agent
+        if self.selected_agent == agent_name:
+            if role_updated:
                 try:
-                    scroll = self.query_one("#trajectory-scroll", VerticalScroll)
+                    self.query_one("#role-display", Markdown).update(
+                        self.agent_roles.get(agent_name, ""))
                 except Exception:
-                    continue  # Widget not ready
+                    pass
+            if had_new_items:
+                self._rebuild_trajectory(agent_name)
 
-                # Smart Scroll: Check if at bottom BEFORE mounting
-                at_bottom = scroll.scroll_y >= scroll.max_scroll_y
+    @staticmethod
+    def _parse_log_entry(evt_type: str, data: dict, timestamp: float) -> List[Dict]:
+        """Parse a single JSONL log entry into display items (pure data, no UI)."""
+        def get_truncated(text: str) -> str:
+            return text[:200] + "..." if len(text) > 200 else text
 
-                # Mount new trajectory widget
-                try:
-                    scroll.mount(TrajectoryItem(
-                        item_data["type"],
-                        item_data["content"],
-                        item_data["timestamp"]
-                    ))
-                    self.trajectory_widget_count += 1
-                except Exception as e:
-                    Logger.error(f"[Monitor] Failed to mount live trajectory item: {e}")
+        items = []
+        if evt_type == "message":
+            msg_content = data.get("content", "")
+            if msg_content:
+                items.append({"type": "thought", "content": get_truncated(msg_content), "timestamp": timestamp})
 
-                # Maintain windowed UI using counter (avoids expensive DOM queries)
-                if self.trajectory_widget_count > MAX_TRAJECTORY_WIDGETS:
-                    if not self._has_omitted_hint:
-                        # First overflow: remove oldest widget, add hint
-                        first_child = scroll.children[0] if scroll.children else None
-                        if first_child:
-                            first_child.remove()
-                            self.trajectory_widget_count -= 1
-                        scroll.mount(Static("... (Earlier history omitted)", classes="omitted-hint"), before=0)
-                        self._has_omitted_hint = True
-                    else:
-                        # Subsequent overflow: remove first real item (after hint)
-                        if len(scroll.children) > 1:
-                            scroll.children[1].remove()
-                            self.trajectory_widget_count -= 1
+        elif evt_type == "tool_call":
+            for call in data.get("tool_calls", []):
+                fn = call.get("function", {})
+                call_text = f"Call: {fn.get('name')}({fn.get('arguments')})"
+                items.append({"type": "tool_call", "content": get_truncated(call_text), "timestamp": timestamp})
 
-                # Smart Scroll: Apply
-                if at_bottom:
-                    scroll.scroll_end(animate=False)
+        elif evt_type == "tool_result":
+            items.append({"type": "tool_result", "content": get_truncated(data.get("result", "")), "timestamp": timestamp})
 
-        except Exception as e:
-            Logger.error(f"[Monitor] Error processing log line: {e}")
+        elif evt_type == "intervention":
+            items.append({"type": "intervention", "content": get_truncated(data.get("content", "")), "timestamp": timestamp})
+
+        elif evt_type == "lifecycle":
+            evt = data.get("event", "")
+            reason = data.get("reason", "")
+            items.append({"type": "lifecycle", "content": f"{evt}: {reason}", "timestamp": timestamp})
+
+        elif evt_type == "error":
+            items.append({"type": "error", "content": get_truncated(data.get("error", "Unknown Error")), "timestamp": timestamp})
+
+        return items
+
+    def _rebuild_trajectory(self, agent_name: str):
+        """Rebuild the trajectory UI from cache — single DOM operation."""
+        try:
+            scroll = self.query_one("#trajectory-scroll", VerticalScroll)
+        except Exception:
+            return
+
+        # Check scroll position before clearing
+        at_bottom = scroll.scroll_y >= scroll.max_scroll_y
+
+        # Clear all existing widgets
+        scroll.query("*").remove()
+        self.trajectory_widget_count = 0
+        self._has_omitted_hint = False
+
+        all_entries = self.agent_entries.get(agent_name, [])
+        display_entries = all_entries[-MAX_TRAJECTORY_WIDGETS:]
+
+        if len(all_entries) > MAX_TRAJECTORY_WIDGETS:
+            scroll.mount(Static("... (Earlier history omitted)", classes="omitted-hint"))
+            self._has_omitted_hint = True
+
+        for entry in display_entries:
+            try:
+                scroll.mount(TrajectoryItem(
+                    entry["type"],
+                    entry["content"],
+                    entry["timestamp"]
+                ))
+                self.trajectory_widget_count += 1
+            except Exception as e:
+                Logger.error(f"[Monitor] Failed to mount trajectory item: {e}")
+
+        if at_bottom:
+            scroll.scroll_end(animate=False)
 
     @on(Input.Submitted, "#intervention-input")
     def on_submit_intervention(self, event: Input.Submitted):
@@ -724,7 +695,12 @@ class AgentMonitorScreen(Screen):
         try:
             # Use file lock for safe concurrent access
             from src.utils.file_lock import file_lock
-            
+
+            # Create mailbox file if it doesn't exist ('r+' mode requires existing file)
+            if not os.path.exists(mailbox_path):
+                with open(mailbox_path, 'w', encoding='utf-8') as f:
+                    json.dump([], f)
+
             with file_lock(mailbox_path, 'r+', fcntl.LOCK_EX, timeout=5) as fd:
                 if fd is None:
                     Logger.error(f"[Monitor] Failed to acquire lock for mailbox {agent_name}")
