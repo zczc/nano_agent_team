@@ -451,12 +451,39 @@ Operations:
                 for k, v in updates.items():
                     target_task[k] = v
 
+                # --- Post-update: auto-fix dependency status consistency ---
+                task_status_map = {t.get("id"): t.get("status") for t in tasks if isinstance(t, dict)}
+                for t in tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    tid = t.get("id")
+                    deps = t.get("dependencies", [])
+                    status = t.get("status")
+                    if not deps:
+                        continue
+                    all_deps_done = all(task_status_map.get(d) == "DONE" for d in deps)
+                    has_unfulfilled = not all_deps_done
+                    # BLOCKED -> PENDING when all deps are done
+                    if status == "BLOCKED" and all_deps_done:
+                        t["status"] = "PENDING"
+                        Logger.info(f"[BlackboardTool] Auto-unblocked Task {tid} (all deps DONE)")
+                    # PENDING -> BLOCKED when some deps are not done
+                    elif status == "PENDING" and has_unfulfilled:
+                        t["status"] = "BLOCKED"
+                        Logger.info(f"[BlackboardTool] Auto-blocked Task {tid} (unfulfilled deps)")
+
+                # --- Post-update: full DAG structural validation ---
                 new_json_str = json.dumps(plan, indent=2, ensure_ascii=False)
                 new_body = body[:json_start+7] + "\n" + new_json_str + "\n" + body[json_end:]
                 if meta:
                     new_content = "---\n" + yaml.dump(meta, sort_keys=False, width=1000) + "---\n" + new_body
                 else:
                     new_content = new_body
+
+                if filename == "central_plan.md" or filename.endswith("/central_plan.md"):
+                    val_error = self._validate_central_plan(new_content)
+                    if val_error:
+                        return f"Error: update_task rejected — {val_error}"
 
                 try:
                     verify_meta, _ = parse_frontmatter(new_content)
