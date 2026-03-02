@@ -197,7 +197,7 @@ class AnthropicAdapter:
                             "id": block.id,
                             "function": {
                                 "name": block.name,
-                                "arguments": json.dumps(block.input)
+                                "arguments": json.dumps(block.input, ensure_ascii=False)
                             }
                         })
 
@@ -338,7 +338,7 @@ class GeminiAdapter:
                             "id": f"call_{uuid.uuid4().hex[:12]}",
                             "function": {
                                 "name": part.function_call.name,
-                                "arguments": json.dumps(dict(part.function_call.args))
+                                "arguments": json.dumps(dict(part.function_call.args), ensure_ascii=False)
                             }
                         })
 
@@ -369,7 +369,7 @@ class GeminiAdapter:
                                     "id": f"call_{uuid.uuid4().hex[:12]}",
                                     "function": {
                                         "name": part.function_call.name,
-                                        "arguments": json.dumps(dict(part.function_call.args))
+                                        "arguments": json.dumps(dict(part.function_call.args), ensure_ascii=False)
                                     }
                                 }])
                     except (ValueError, IndexError, AttributeError):

@@ -85,51 +85,91 @@ class StrategyMiddleware(ABC):
 class LoopBreakerMiddleware(StrategyMiddleware):
     """
     Loop Detection Middleware
-    
+
     Prevents Agent from entering infinite loops, especially repeating failed tool calls.
-    
+
     How it works:
-        1. Analyzes assistant messages in session.history
-        2. Extracts recent tool calls (tool_calls)
-        3. Detects if there are N consecutive identical calls
-        4. Injects warning into system_config if loop detected
+        1. Scans ALL assistant messages (ignores injected user messages from guards)
+        2. Extracts recent consecutive tool calls
+        3. Detects exact duplicates or same-tool loops
+        4. Injects warning as a user message for higher visibility
     """
-    
-    def __init__(self, max_repeats: int = 3):
+
+    LOOP_BREAKER_TAG = "[LOOP BREAKER]"
+
+    def __init__(self, max_repeats: int = 3, max_same_tool: int = 8):
         """
         Initialize Loop Detection Middleware
-        
+
         Args:
             max_repeats: Max allowed repeats, default 3.
                         Trigger warning when same call appears 3 times.
+            max_same_tool: Max consecutive calls to same tool name (regardless of args), default 8.
+                          Catches varied-arg loops (e.g. web_search with different queries).
         """
         self.max_repeats = max_repeats
+        self.max_same_tool = max_same_tool
 
     def __call__(self, session: AgentSession, next_call: Callable[[AgentSession], Any]) -> Any:
-        # We look at the history to find consecutive identical tool calls
+        # Scan assistant messages to find consecutive tool calls.
+        # Do NOT break on user messages — guards inject user messages that would
+        # reset the counter and mask real loops (e.g. 97 consecutive web_search).
         tool_calls_history = []
+        tool_names_history = []
+        scan_limit = self.max_same_tool * 2  # look back enough messages
         for msg in reversed(session.history):
             if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                # Extract simplified tool call signature: name + args
                 for tc in msg["tool_calls"]:
                     sig = (tc["function"]["name"], tc["function"]["arguments"])
                     tool_calls_history.append(sig)
-            elif msg.get("role") == "user":
-                # Reset history on new user message if this was a long-running session
-                break
-        
-        # Check for repeats
+                    tool_names_history.append(tc["function"]["name"])
+                if len(tool_names_history) >= scan_limit:
+                    break
+
+        # Check 1: Exact duplicate calls (same name + same args)
         if len(tool_calls_history) >= self.max_repeats:
             last_n = tool_calls_history[:self.max_repeats]
             if all(x == last_n[0] for x in last_n):
-                Logger.error(f"Loop detected for tool: {last_n[0][0]}")
-                # Intervene by adding a hidden system message to warn the LLM
-                session.system_config.extra_sections.append(
-                    f"WARNING: You have attempted to call '{last_n[0][0]}' with the same arguments {self.max_repeats} times consecutively. "
-                    "This action is failing to produce a new result. PLEASE CHANGE YOUR STRATEGY or stop this action."
+                tool_name = last_n[0][0]
+                Logger.error(f"Loop detected for tool: {tool_name}")
+                warning = (
+                    f"### {self.LOOP_BREAKER_TAG}\n"
+                    f"WARNING: You have called `{tool_name}` with the **same arguments** "
+                    f"{self.max_repeats} times consecutively. This is an unproductive loop.\n"
+                    f"**You MUST change your strategy NOW.** Do NOT call `{tool_name}` again with the same arguments. "
+                    f"Instead, use the results you already have, try a different tool, or move on to the next step."
                 )
-        
+                self._inject_warning(session, warning)
+
+        # Check 2: Same tool name called repeatedly (even with different args)
+        if len(tool_names_history) >= self.max_same_tool:
+            last_m = tool_names_history[:self.max_same_tool]
+            if all(x == last_m[0] for x in last_m):
+                tool_name = last_m[0]
+                Logger.error(f"Same-tool loop detected: '{tool_name}' called {self.max_same_tool} times consecutively")
+                warning = (
+                    f"### {self.LOOP_BREAKER_TAG}\n"
+                    f"CRITICAL: You have called `{tool_name}` **{self.max_same_tool} times consecutively** "
+                    f"(with varying arguments). This is an unproductive loop.\n"
+                    f"**STOP using `{tool_name}` immediately.** You MUST:\n"
+                    f"1. Synthesize the information you already have\n"
+                    f"2. Write your output to a file\n"
+                    f"3. Update your task status\n"
+                    f"Do NOT call `{tool_name}` again."
+                )
+                self._inject_warning(session, warning)
+
         return next_call(session)
+
+    def _inject_warning(self, session: AgentSession, warning: str):
+        """Inject loop warning as a user message (not system prompt) for higher visibility.
+        Avoids duplicate injection if the same warning is already the last user message."""
+        # Check for duplicate
+        if (session.history and
+                session.history[-1].get("role") == "user" and
+                self.LOOP_BREAKER_TAG in session.history[-1].get("content", "")):
+            return  # Already warned this turn
+        session.history.append({"role": "user", "content": warning})
 
 class SemanticDriftGuard(StrategyMiddleware):
     """

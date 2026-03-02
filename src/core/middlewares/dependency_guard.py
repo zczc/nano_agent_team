@@ -240,7 +240,7 @@ class DependencyGuardMiddleware(StrategyMiddleware):
                     "duration": 5,
                     "wait_for_new_index": False,
                     "reason": f"BLOCKED BY GUARD: {violation_reason}. Please check dependencies."
-                })
+                }, ensure_ascii=False)
 
                 yield create_mock_tool_chunk(tc_data["id"], new_name, new_args, idx)
 

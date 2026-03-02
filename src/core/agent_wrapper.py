@@ -33,9 +33,9 @@ from src.tools.spawn_tool import SpawnSwarmAgentTool
 from src.core.prompt_builder import PromptBuilder
 from src.core.runtime import RuntimeManager
 from src.core.middlewares import (
-    WatchdogGuardMiddleware, 
-    DependencyGuardMiddleware, 
-    MailboxMiddleware, 
+    WorkerGuardMiddleware,
+    DependencyGuardMiddleware,
+    MailboxMiddleware,
     SwarmStateMiddleware,
     NotificationAwarenessMiddleware,
     ActivityLoggerMiddleware,
@@ -76,7 +76,7 @@ class SwarmAgent:
                 watch_dir=os.path.join(blackboard_dir, "global_indices"),
                 blackboard_root=blackboard_dir
             ),
-            FinishTool(),
+            FinishTool(agent_name=name, agent_role=role, blackboard_dir=blackboard_dir),
             AskUserTool(),
             SpawnSwarmAgentTool(blackboard_dir, max_iterations=max_iterations)
         ]
@@ -109,17 +109,24 @@ class SwarmAgent:
             if hasattr(tool, 'configure'):
                 tool.configure({
                     "agent_model": model,
-                    "agent_name": name  # Pass agent name for parent tracking
+                    "agent_name": name,
+                    "is_architect": False  # Workers are not architects; overridden by agent_bridge for Architect
                 })
 
         # Register SIGTERM handler for graceful shutdown (cleanup registry before exit)
         # This may fail in TUI worker threads — that's OK, TUI has its own shutdown path.
+        _sigterm_in_progress = False
         def _sigterm_handler(signum, frame):
+            nonlocal _sigterm_in_progress
+            if _sigterm_in_progress:
+                return
+            _sigterm_in_progress = True
             try:
                 self.deregister()
             except Exception:
                 pass
             # 杀掉自己所在的整个进程组（含 browser-use 等子进程），避免孤儿进程
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
             try:
                 os.killpg(os.getpgid(os.getpid()), signal.SIGTERM)
             except (ProcessLookupError, PermissionError, OSError):
@@ -142,39 +149,38 @@ class SwarmAgent:
         if self.engine and hasattr(self.engine, 'strategies'):
             self.engine.strategies.append(strategy)
         
-    def run(self, goal: str = "", scenario: str = "", critical_tools: List[str] = None):
+    def run(self, goal: str = "", scenario: str = ""):
         """
         Starts the Agent Loop.
         """
         print(f"[{self.name}] Booting up with role: {self.role}")
         print(f"[{self.name}] Blackboard: {self.blackboard_dir}")
-        
+
         # Dynamic System Prompt
         sys_prompt_content = self.prompt_builder.build(self.role, scenario)
-        
+
         # Resolve path variables in system prompt so LLM knows the actual paths
         sys_prompt_content = sys_prompt_content.replace("{{blackboard}}", os.path.abspath(self.blackboard_dir))
         sys_prompt_content = sys_prompt_content.replace("{{root_path}}", Config.ROOT_PATH)
-        
+
         system_config = SystemPromptConfig(base_prompt=sys_prompt_content)
-        
+
         # Log System Prompt for TUI
         from collections import namedtuple
         Event = namedtuple("Event", ["type", "data"])
         self.handle_event(Event(type="system_prompt", data={"content": sys_prompt_content}))
-        
+
         initial_message = goal if goal else f"Hello {self.role}, please check the Blackboard Indicies and begin your work."
         messages = [{"role": "user", "content": initial_message}]
-        
+
         print(f"[{self.name}] Starting loop...")
-        
-        # Determine strict strategies if this is Watchdog
-        if critical_tools:
-             # Check if already added to avoid duplicates
-             already_has = any(isinstance(s, WatchdogGuardMiddleware) for s in self.engine.strategies)
-             if not already_has:
-                 # Pass critical_tools to middleware
-                 self.engine.strategies.append(WatchdogGuardMiddleware(agent_name=self.name, blackboard_dir=self.blackboard_dir, critical_tools=critical_tools))
+
+        # Add WorkerGuardMiddleware for Worker agents — skip if ArchitectGuardMiddleware is already present
+        from src.core.middlewares import ArchitectGuardMiddleware
+        has_architect_guard = any(isinstance(s, ArchitectGuardMiddleware) for s in self.engine.strategies)
+        has_worker_guard = any(isinstance(s, WorkerGuardMiddleware) for s in self.engine.strategies)
+        if not has_architect_guard and not has_worker_guard:
+            self.engine.strategies.append(WorkerGuardMiddleware(agent_name=self.name, blackboard_dir=self.blackboard_dir))
         
         max_engine_retries = 3  # Maximum times to restart the engine on connection errors
         engine_retry_count = 0
@@ -190,25 +196,41 @@ class SwarmAgent:
                     run_limit = self.max_iterations + 20
                     event_generator = self.engine.run(messages, system_config, max_iterations=run_limit)
 
+                    iteration_count = 0
                     while True:
                         try:
                             event = next(event_generator)
                             self.handle_event(event)
+                            if event.type == "tool_call":
+                                iteration_count += 1
 
                             # Check for termination signal
                             if event.type == "tool_result" and event.data.get("name") == "finish":
-                                 print(f"[{self.name}] Detected 'finish' tool call. Stopping loop.")
+                                 from backend.utils.logger import Logger
+                                 Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: finish tool detected after {iteration_count} tool calls.")
+                                 print(f"[{self.name}] Detected 'finish' tool call after {iteration_count} tool calls. Stopping loop.")
                                  return  # Normal exit, don't retry
 
                         except StopIteration:
+                            from backend.utils.logger import Logger
+                            Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: StopIteration (generator exhausted) after {iteration_count} tool calls. max_iterations={self.max_iterations}, run_limit={run_limit}")
+                            print(f"[{self.name}] Agent loop completed after {iteration_count} tool calls (max_iterations={self.max_iterations}).")
+                            if iteration_count >= self.max_iterations:
+                                print(f"[{self.name}] WARNING: Agent terminated because max_iterations ({self.max_iterations}) was reached. Tasks may be incomplete.")
+                            self._cleanup_on_max_iterations()
                             return  # Normal completion, don't retry
 
                 except KeyboardInterrupt:
-                    print("\n[SwarmAgent] Interrupted by user.")
+                    from backend.utils.logger import Logger
+                    Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: KeyboardInterrupt.")
+                    print(f"\n[{self.name}] Interrupted by user.")
                     return  # User interrupt, don't retry
 
                 except Exception as e:
+                    from backend.utils.logger import Logger
+                    Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: Exception: {e}")
                     error_msg = str(e).lower()
+                    print(f"[{self.name}] Exception in agent loop: {e}")
 
                     # Check if this is a recoverable connection error
                     is_connection_error = any(keyword in error_msg for keyword in [
@@ -267,8 +289,102 @@ class SwarmAgent:
             print(f"[{self.name}] Failed to register.")
 
     def deregister(self):
-        """Updates the agent's status to DEAD in registry.json on exit."""
+        """Updates the agent's status to DEAD in registry.json on exit. Idempotent."""
+        if getattr(self, '_deregistered', False):
+            return
+        self._deregistered = True
         RuntimeManager.cleanup_agent(self.name, self.blackboard_dir)
+
+    def _cleanup_on_max_iterations(self):
+        """
+        Cleanup logic when agent reaches max_iterations.
+        Notifies parent agent that worker was interrupted.
+        Does NOT mark tasks as DONE (parent should decide next steps).
+        """
+        try:
+            # Find my tasks for reporting purposes
+            blackboard_tool = None
+            for tool in self.tools:
+                if isinstance(tool, BlackboardTool):
+                    blackboard_tool = tool
+                    break
+
+            my_tasks = []
+            if blackboard_tool:
+                try:
+                    result = blackboard_tool.execute(operation="read_index", filename="central_plan.md")
+                    if "error" not in result.lower() and "not found" not in result.lower():
+                        import json
+                        plan_data = json.loads(result)
+                        plan_content = plan_data.get("content", "")
+
+                        # Extract JSON from markdown
+                        import re
+                        json_match = re.search(r'```json\s*(\{.*?\})\s*```', plan_content, re.DOTALL)
+                        if json_match:
+                            plan_json = json.loads(json_match.group(1))
+                            my_tasks = [
+                                t for t in plan_json.get("tasks", [])
+                                if self.name in t.get("assignees", [])
+                            ]
+                except Exception as e:
+                    print(f"[{self.name}] Failed to read central_plan.md: {e}")
+
+            # Notify parent agent via mailbox
+            parent_pid = None
+            parent_agent_name = None
+
+            # Find parent info from middlewares
+            for strategy in self.engine.strategies:
+                if hasattr(strategy, 'parent_pid'):
+                    parent_pid = strategy.parent_pid
+                if hasattr(strategy, 'parent_agent_name'):
+                    parent_agent_name = strategy.parent_agent_name
+
+            if parent_agent_name:
+                try:
+                    import json
+                    import datetime
+
+                    mailbox_dir = os.path.join(self.blackboard_dir, "mailboxes")
+                    os.makedirs(mailbox_dir, exist_ok=True)
+                    mailbox_path = os.path.join(mailbox_dir, f"{parent_agent_name}.json")
+
+                    # Collect task info
+                    in_progress_tasks = [t for t in my_tasks if t.get("status") == "IN_PROGRESS"]
+
+                    # Format task details for content
+                    task_details = []
+                    for t in in_progress_tasks:
+                        task_details.append(f"  - Task #{t['id']}: {t.get('description', 'N/A')}")
+                    task_details_str = "\n".join(task_details) if task_details else "  (none)"
+
+                    message = {
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "from": self.name,
+                        "type": "max_iterations_reached",
+                        "status": "unread",  # Required by mailbox middleware
+                        "content": f"⚠️ Agent {self.name} reached max iterations ({self.max_iterations}) and was terminated. Tasks may be incomplete.\n\nIN_PROGRESS tasks ({len(in_progress_tasks)}):\n{task_details_str}\n\nPlease review these tasks and decide next steps:\n- Check if tasks are actually complete (check artifacts)\n- Re-spawn worker with higher max_iterations if needed\n- Break down into smaller subtasks if needed",
+                        "tasks": [{"id": t["id"], "status": t.get("status"), "description": t.get("description")} for t in my_tasks],
+                        "in_progress_count": len(in_progress_tasks)
+                    }
+
+                    # Append to mailbox
+                    messages = []
+                    if os.path.exists(mailbox_path):
+                        with open(mailbox_path, 'r') as f:
+                            messages = json.load(f)
+                    messages.append(message)
+
+                    with open(mailbox_path, 'w') as f:
+                        json.dump(messages, f, indent=2)
+
+                    print(f"[{self.name}] ⚠️ Notified {parent_agent_name}: reached max_iterations with {len(in_progress_tasks)} IN_PROGRESS tasks")
+                except Exception as e:
+                    print(f"[{self.name}] Failed to notify parent agent: {e}")
+
+        except Exception as e:
+            print(f"[{self.name}] Error in _cleanup_on_max_iterations: {e}")
 
     def handle_event(self, event):
         """Simple CLI Visualization of events + JSONL Logging"""

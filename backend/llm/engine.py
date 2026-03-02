@@ -123,7 +123,17 @@ class AgentEngine:
             session.metadata["llm_model"] = self.model
 
             model = self.model
-            messages = [{"role": "system", "content": session.system_config.build()}] + session.history
+            # For reasoning models (e.g. deepseek-reasoner): clear reasoning_content
+            # from prior assistant messages to save context, keeping the field present as "".
+            cleaned_history = []
+            for msg in session.history:
+                if msg.get("role") == "assistant" and "reasoning_content" in msg and msg["reasoning_content"]:
+                    msg_copy = {k: v for k, v in msg.items() if k != "reasoning_content"}
+                    msg_copy["reasoning_content"] = ""
+                    cleaned_history.append(msg_copy)
+                else:
+                    cleaned_history.append(msg)
+            messages = [{"role": "system", "content": session.system_config.build()}] + cleaned_history
 
             if not self.client:
                 raise RuntimeError("LLM 客户端未初始化，请检查 keys.json 或环境变量中的 API Key，并确认 openai 依赖已安装。")
@@ -135,6 +145,7 @@ class AgentEngine:
             }
             if session.tools:
                 kwargs["tools"] = [t.to_openai_schema() for t in session.tools]
+                kwargs["tool_choice"] = "auto"
 
             return self.client.chat.completions.create(**kwargs)
 
@@ -226,7 +237,7 @@ class AgentEngine:
                             "type": "function",
                             "function": {
                                 "name": "activate_skill",
-                                "arguments": json.dumps({"skill_name": s_name})
+                                "arguments": json.dumps({"skill_name": s_name}, ensure_ascii=False)
                             }
                         }]
                     })
@@ -249,6 +260,9 @@ class AgentEngine:
 
         session = AgentSession(history=list(messages), depth=self.depth, system_config=system_config, tools=current_tools)
         pipeline = self._get_llm_pipeline()
+        _has_reasoning = False  # auto-detect reasoning model from stream
+        _engine_pid = os.getpid()
+        Logger.info(f"[Engine PID={_engine_pid}] Starting agent loop. max_iterations={max_iterations}, model={self.model}, history_len={len(messages)}")
         try:
             for iteration in range(max_iterations):
                 session.metadata["iteration_count"] = iteration + 1
@@ -257,25 +271,38 @@ class AgentEngine:
                 # happen during iteration, outside middleware scope. Retry here and
                 # re-invoke pipeline (which passes through the full middleware chain).
                 full_content = ""
+                reasoning_content = ""
                 tool_calls = []
                 for stream_attempt in range(3):  # max 3 attempts (1 initial + 2 retries)
                     try:
                         stream = pipeline(session)
                         full_content = ""
+                        reasoning_content = ""
                         tool_calls = []
                         for chunk in stream:
                             delta = chunk.choices[0].delta
                             if delta.tool_calls:
                                 for tc_chunk in delta.tool_calls:
-                                    if len(tool_calls) <= tc_chunk.index:
+                                    idx = tc_chunk.index if tc_chunk.index is not None else 0
+                                    if len(tool_calls) <= idx:
                                         tool_calls.append({"id": tc_chunk.id, "function": {"name": "", "arguments": ""}})
-                                    tc = tool_calls[tc_chunk.index]
+                                    tc = tool_calls[idx]
                                     if tc_chunk.id: tc["id"] = tc_chunk.id
-                                    if tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
-                                    if tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
+                                    if tc_chunk.function and tc_chunk.function.name: tc["function"]["name"] += tc_chunk.function.name
+                                    if tc_chunk.function and tc_chunk.function.arguments: tc["function"]["arguments"] += tc_chunk.function.arguments
                             if delta.content:
                                 full_content += delta.content
                                 yield AgentEvent(type="token", data={"delta": delta.content})
+                            # DeepSeek Reasoner: capture reasoning_content from stream
+                            rc = getattr(delta, "reasoning_content", None)
+                            if rc:
+                                reasoning_content += rc
+                                if not _has_reasoning:
+                                    _has_reasoning = True
+                                    # Back-fill: add reasoning_content="" to all prior assistant messages
+                                    for prev_msg in session.history:
+                                        if prev_msg.get("role") == "assistant" and "reasoning_content" not in prev_msg:
+                                            prev_msg["reasoning_content"] = ""
                         break  # stream consumed successfully
                     except Exception as e:
                         if stream_attempt < 2:
@@ -283,7 +310,9 @@ class AgentEngine:
                             continue
                         raise  # exhausted retries, let outer except handle
                 
+                Logger.info(f"[Engine PID={_engine_pid}] Iter {iteration+1}/{max_iterations}: tool_calls={len(tool_calls)}, content_len={len(full_content)}, reasoning_len={len(reasoning_content)}")
                 if not tool_calls:
+                    Logger.info(f"[Engine PID={_engine_pid}] EXIT REASON: No tool calls at iter {iteration+1}. LLM returned plain text. content={repr(full_content[:300])}")
                     if search_citations:
                         citation_text = "\n\n**References:**\n"
                         for idx, item in enumerate(search_citations, 1):
@@ -294,21 +323,27 @@ class AgentEngine:
                         full_content += citation_text
                         yield AgentEvent(type="token", data={"delta": citation_text})
 
-                    session.history.append({"role": "assistant", "content": full_content})
+                    msg = {"role": "assistant", "content": full_content}
+                    if _has_reasoning:
+                        msg["reasoning_content"] = ""
+                    session.history.append(msg)
                     yield AgentEvent(type="message", data=session.history[-1])
 
                     if on_step_log: on_step_log("assistant_response", content=full_content)
                     break
 
-                session.history.append({
-                    "role": "assistant", 
-                    "content": full_content or None, 
+                msg = {
+                    "role": "assistant",
+                    "content": full_content or None,
                     "tool_calls": [{
                         "id": tc["id"],
                         "type": "function",
                         "function": tc["function"]
                     } for tc in tool_calls]
-                })
+                }
+                if _has_reasoning:
+                    msg["reasoning_content"] = ""
+                session.history.append(msg)
                 yield AgentEvent(type="message", data=session.history[-1])
 
                 if on_step_log: on_step_log("tool_call_request", tool_calls=tool_calls, assistant_content=full_content)
@@ -346,13 +381,14 @@ class AgentEngine:
 
                     # Downgrade failed finish to wait — prevent engine from breaking on invalid finish
                     if fn_name == "finish" and str(result).startswith("Error:"):
+                        Logger.info(f"[Engine PID={_engine_pid}] finish tool BLOCKED (downgraded to wait). Error: {str(result)[:200]}")
                         error_detail = str(result)
                         tc["function"]["name"] = "wait"
                         tc["function"]["arguments"] = json.dumps({
                             "duration": 0.1,
                             "wait_for_new_index": False,
                             "reason": f"Your finish call failed: {error_detail}. Please fix the arguments and call finish again."
-                        })
+                        }, ensure_ascii=False)
                         wait_tool = next((t for t in current_tools if t.name == "wait"), None)
                         if wait_tool:
                             try:
@@ -446,18 +482,24 @@ class AgentEngine:
 
                     if on_step_log: on_step_log("tool_result", tool_call_id=tc["id"], function_name=fn_name, arguments=args, result=str(result))
 
-                if "finish" in ','.join([fn_name for tc, result, fn_name, args in tool_results]):
+                tool_names_this_iter = [fn_name for tc, result, fn_name, args in tool_results]
+                if "finish" in ','.join(tool_names_this_iter):
+                    Logger.info(f"[Engine PID={_engine_pid}] EXIT REASON: finish tool detected at iter {iteration+1}. tools={tool_names_this_iter}")
                     break
             else:
                 # If the loop finished without break, it means max_iterations was reached
+                Logger.info(f"[Engine PID={_engine_pid}] EXIT REASON: max_iterations ({max_iterations}) reached. Loop exhausted.")
                 yield AgentEvent(type="error", data={"error": f"Agent (PID: {os.getpid()}) has reached the maximum iteration limit ({max_iterations}), the agent is closed. You can use commend /iterations * to improve it."})
             
             # End of loop
+            Logger.info(f"[Engine PID={_engine_pid}] Loop ended. Total iterations used: {iteration+1}/{max_iterations}. Yielding finish event.")
             final_history = session.history if return_full_history else [session.history[-1]]
             yield AgentEvent(type="finish", data={"history": final_history})
 
+        except GeneratorExit:
+            Logger.info(f"[Engine PID={_engine_pid}] EXIT REASON: GeneratorExit — caller closed the generator (bridge.stop() or timeout). iter={iteration+1}/{max_iterations}")
         except Exception as e:
-            Logger.error(f"AgentEngine execution error: {e}")
+            Logger.error(f"[Engine PID={_engine_pid}] EXIT REASON: Exception at iter {iteration+1}/{max_iterations}: {e}")
             yield AgentEvent(type="error", data={"error": str(e)})
             raise e
         finally:

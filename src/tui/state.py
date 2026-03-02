@@ -91,7 +91,7 @@ class StateManager:
         self._agent_lock = threading.Lock()
         
         # Swarm configuration
-        self._swarm_max_iterations: int = 200  # Default matches main.py
+        self._swarm_max_iterations: int = 400  # Default for Swarm mode
         
         # Persistence path
         self._data_dir = os.path.expanduser("~/.nano_agent_team")
@@ -258,7 +258,7 @@ class StateManager:
     @swarm_max_iterations.setter
     def swarm_max_iterations(self, value: int):
         """Set max iterations for Swarm mode"""
-        self._swarm_max_iterations = max(10, min(500, value))  # Clamp 10-500
+        self._swarm_max_iterations = max(10, min(1000, value))  # Clamp 10-1000
         self._save()
     
     # === Session ID Management ===

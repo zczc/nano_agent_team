@@ -12,33 +12,39 @@ from src.utils.registry_manager import RegistryManager
 from src.utils.file_lock import file_lock
 
 
-class WatchdogGuardMiddleware(StrategyMiddleware):
+class ArchitectGuardMiddleware(StrategyMiddleware):
     """
-    Watchdog Guard Middleware (StrategyMiddleware Pattern)
+    Architect Guard Middleware — enforces protocol for the main coordinating agent.
 
-    Intercepts the LLM stream to enforce protocol:
-    Rule A: If 'spawn_swarm_agent' but NO central_plan.md or NO 'ask_user' in history ->
-            Rename to 'wait' with warning (must create plan + verify first).
-    Rule C: If 'write_file'/'edit_file' but NO 'ask_user' in history ->
-            Rename to 'wait' with warning (Architect must not do execution work).
-    Rule B: If 'finish' but mission status is 'IN_PROGRESS' ->
-            Rename to 'wait' with warning (must complete mission first).
-            'UNKNOWN' status (no plan/tasks) is allowed to finish.
-    End-of-stream: If NO tool calls -> inject ask_user / wait / finish as appropriate.
-    Pre-check: Detect dead agents with incomplete tasks and alert Architect.
+    Pre-call:
+      - Dead Agent Detection: alert Architect about DEAD agents with incomplete tasks.
+      - Persistence Guard: remind Architect to keep monitoring every N turns.
+
+    Stream interception:
+      Rule A: spawn_swarm_agent requires central_plan.md + ask_user verification.
+      Rule B: finish blocked while mission_status == IN_PROGRESS.
+      Rule C: write_file/edit_file blocked until Architect has spawned Workers.
+
+    End-of-stream (no tool call):
+      - DONE → inject finish
+      - No ask_user yet → inject wait + protocol reminder
+      - Agents running → inject wait
+      - No agents running → strike counting with escalating warnings
     """
     EXECUTION_TOOLS = {"write_file", "edit_file"}
-
     MAX_NO_AGENT_STRIKES = 3
 
-    def __init__(self, agent_name: str = "Assistant", blackboard_dir: str = ".blackboard",
-                 skip_user_verification: bool = False, is_architect: bool = True):
+    def __init__(self, agent_name: str = "Architect", blackboard_dir: str = ".blackboard",
+                 skip_user_verification: bool = False):
         self.agent_name = agent_name
         self.blackboard_dir = blackboard_dir
         self.skip_user_verification = skip_user_verification
-        self.is_architect = is_architect
         self._registry = RegistryManager(blackboard_dir)
         self._no_agent_strike_count = 0
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _is_anyone_else_running(self) -> bool:
         try:
@@ -59,7 +65,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                         return True
             return False
         except Exception as e:
-            Logger.debug(f"[Watchdog] Error reading registry: {e}")
+            Logger.debug(f"[ArchitectGuard] Error reading registry: {e}")
             return False
 
     def _check_mission_status(self) -> str:
@@ -92,6 +98,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                 all_done = all(t.get("status") == "DONE" for t in tasks)
                 if not all_done:
                     return "IN_PROGRESS"
+                # All tasks DONE — check mission-level status
                 if mission_status == "DONE":
                     return "DONE"
                 return "ALL_TASKS_DONE"
@@ -100,7 +107,6 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
             return "UNKNOWN"
 
     def _get_dead_agents_with_incomplete_tasks(self) -> List[dict]:
-        """Check registry for DEAD agents with incomplete tasks in the plan."""
         results = []
         try:
             registry = self._registry.read()
@@ -132,15 +138,19 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                                        "desc": t.get("description", "")[:80]} for t in agent_tasks]
                         })
         except Exception as e:
-            Logger.debug(f"[Watchdog] Error checking dead agents: {e}")
+            Logger.debug(f"[ArchitectGuard] Error checking dead agents: {e}")
         return results
+
+    # ------------------------------------------------------------------
+    # Pre-call phase
+    # ------------------------------------------------------------------
 
     def __call__(self, session: AgentSession, next_call: Callable[[AgentSession], Any]) -> Any:
         mission_status = self._check_mission_status()
 
-        # PRE-CHECK: Detect dead agents with incomplete tasks — inject as user message
+        # Dead Agent Detection — inject as user message for higher visibility
         dead_agent_tag = "[DEAD AGENT ALERT]"
-        if mission_status == "IN_PROGRESS" and self.is_architect:
+        if mission_status == "IN_PROGRESS":
             dead_agents = self._get_dead_agents_with_incomplete_tasks()
             if dead_agents:
                 # Avoid duplicate injection
@@ -156,7 +166,6 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                             f"Task #{t['id']}({t['status']}): {t['desc']}" for t in da["tasks"])
                         alert_parts.append(f"- Agent **{da['name']}** is DEAD with incomplete tasks: {task_info}")
                     alert_parts.append("")
-                    alert_parts.append("")
                     alert_parts.append("**You MUST perform the following cleanup immediately:**")
                     alert_parts.append("1. Call `blackboard(operation=\"read_index\", name=\"central_plan.md\")` to get the current checksum.")
                     alert_parts.append("2. For each incomplete task of the dead agent, call "
@@ -168,7 +177,8 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                     alert_parts.append("Do NOT ignore this alert. Do NOT call `finish` until all tasks are DONE.")
                     session.history.append({"role": "user", "content": "\n".join(alert_parts)})
 
-        if self.is_architect and mission_status == "IN_PROGRESS":
+        # Persistence Guard (only when tasks are still incomplete)
+        if mission_status == "IN_PROGRESS":
             current_turn = sum(1 for msg in session.history if msg["role"] == "assistant")
             last_injection_turn = -1
             persistence_tag = "[SYSTEM INTERVENTION: PERSISTENCE GUARD]"
@@ -204,28 +214,33 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
         generator = next_call(session)
         return self._guard_stream(generator, session)
 
+    # ------------------------------------------------------------------
+    # Stream interception phase
+    # ------------------------------------------------------------------
+
     def _guard_stream(self, generator, session):
         has_verified_plan = self.skip_user_verification
-        used_tools = set()
+        has_spawned = False
 
         for msg in session.history:
             if msg.get("role") == "tool":
-                used_tools.add(msg.get("name"))
                 if msg.get("name") == "ask_user":
                     has_verified_plan = True
+                if msg.get("name") == "spawn_swarm_agent":
+                    has_spawned = True
             elif msg.get("role") == "user":
                 if msg.get("metadata", {}).get("from_tool_call") == "ask_user":
                     has_verified_plan = True
 
         # Recovery scenario: if other agents already exist in registry,
         # the plan was previously verified — skip re-verification for respawns
-        if not has_verified_plan and self.is_architect:
+        if not has_verified_plan:
             try:
                 registry = self._registry.read()
                 for name in registry:
                     if name != self.agent_name:
                         has_verified_plan = True
-                        Logger.debug(f"[Watchdog] Recovery mode: agent '{name}' found in registry, skipping ask_user requirement")
+                        Logger.debug(f"[ArchitectGuard] Recovery mode: agent '{name}' found in registry, skipping ask_user requirement")
                         break
             except Exception:
                 pass
@@ -263,11 +278,12 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                             has_plan = os.path.exists(plan_path)
 
                             if not has_plan:
+                                Logger.info(f"[ArchitectGuard] Rule A BLOCKED: spawn_swarm_agent — no central_plan.md")
                                 replace_mode = True
                                 replacement_tool_index = tc.index
                                 tc.function.name = "wait"
                                 tc.function.arguments = json.dumps({
-                                    "duration": 0.1, "wait_for_new_index": False,
+                                    "duration": 0.5, "wait_for_new_index": False,
                                     "reason": "[PLAN VIOLATION] `spawn_swarm_agent` blocked — `central_plan.md` does not exist yet.\n"
                                               "Required order:\n"
                                               "1. Call `blackboard(operation=\"create_index\", name=\"central_plan.md\", content=\"...\")` to create the plan.\n"
@@ -277,11 +293,12 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                                 modified_tool_calls.append(tc)
 
                             elif not has_verified_plan:
+                                Logger.info(f"[ArchitectGuard] Rule A BLOCKED: spawn_swarm_agent — plan not verified by ask_user")
                                 replace_mode = True
                                 replacement_tool_index = tc.index
                                 tc.function.name = "wait"
                                 tc.function.arguments = json.dumps({
-                                    "duration": 0.1, "wait_for_new_index": False,
+                                    "duration": 0.5, "wait_for_new_index": False,
                                     "reason": "[PLAN VIOLATION] `spawn_swarm_agent` blocked — plan exists but not yet approved by user.\n"
                                               "You must call `ask_user(question=\"...\")` to confirm your plan first, "
                                               "then call `spawn_swarm_agent(...)` to launch Workers."
@@ -289,15 +306,16 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                                 modified_tool_calls.append(tc)
 
                             else:
+                                has_spawned = True
                                 modified_tool_calls.append(tc)
 
-                        # Rule C: Unverified Execution (Architect only — Workers may write freely)
-                        elif self.is_architect and tool_name in self.EXECUTION_TOOLS and not has_verified_plan:
+                        # Rule C: Execution interception (must spawn Workers first)
+                        elif tool_name in self.EXECUTION_TOOLS and not has_spawned:
                             replace_mode = True
                             replacement_tool_index = tc.index
                             tc.function.name = "wait"
                             tc.function.arguments = json.dumps({
-                                "duration": 0.1, "wait_for_new_index": False,
+                                "duration": 0.5, "wait_for_new_index": False,
                                 "reason": f"[EXECUTION VIOLATION] `{tool_name}` blocked — Architect must not execute work directly.\n"
                                           "Delegate to Workers instead:\n"
                                           "1. Call `spawn_swarm_agent(name=\"...\", role=\"...\")` to launch a Worker.\n"
@@ -305,26 +323,25 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                             }, ensure_ascii=False)
                             modified_tool_calls.append(tc)
 
-                        # Rule B: Finish Logic (Architect only — Workers may finish freely)
+                        # Rule B: Finish blocked while tasks still incomplete
                         elif tool_name == "finish":
-                            if self.is_architect:
-                                mission_status = self._check_mission_status()
-                                if mission_status == "IN_PROGRESS":
-                                    replace_mode = True
-                                    replacement_tool_index = tc.index
-                                    tc.function.name = "wait"
-                                    tc.function.arguments = json.dumps({
-                                        "duration": 0.1, "wait_for_new_index": False,
-                                        "reason": "[PROTOCOL VIOLATION] Cannot call `finish` — some tasks in "
-                                                  "`central_plan.md` are NOT yet DONE. "
-                                                  "Use `blackboard(operation=\"read_index\", name=\"central_plan.md\")` "
-                                                  "to check current task statuses, then continue monitoring."
-                                    }, ensure_ascii=False)
-                                    modified_tool_calls.append(tc)
-                                else:
-                                    # DONE or ALL_TASKS_DONE — allow finish
-                                    modified_tool_calls.append(tc)
+                            mission_status = self._check_mission_status()
+                            Logger.info(f"[ArchitectGuard] Rule B: finish requested, mission_status={mission_status}")
+                            if mission_status == "IN_PROGRESS":
+                                Logger.info(f"[ArchitectGuard] Rule B BLOCKED: finish — mission still IN_PROGRESS")
+                                replace_mode = True
+                                replacement_tool_index = tc.index
+                                tc.function.name = "wait"
+                                tc.function.arguments = json.dumps({
+                                    "duration": 0.5, "wait_for_new_index": False,
+                                    "reason": "[PROTOCOL VIOLATION] Cannot call `finish` — some tasks in "
+                                              "`central_plan.md` are NOT yet DONE. "
+                                              "Use `blackboard(operation=\"read_index\", name=\"central_plan.md\")` "
+                                              "to check current task statuses, then continue monitoring."
+                                }, ensure_ascii=False)
+                                modified_tool_calls.append(tc)
                             else:
+                                # DONE or ALL_TASKS_DONE — allow finish
                                 modified_tool_calls.append(tc)
 
                         else:
@@ -345,33 +362,26 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
             else:
                 yield chunk
 
-        # 3. END OF STREAM CHECK (No Tool)
-        Logger.debug(f"[Watchdog] End of stream. has_tool_calls={has_tool_calls}")
+        # ------------------------------------------------------------------
+        # End-of-stream phase
+        # ------------------------------------------------------------------
+        Logger.info(f"[ArchitectGuard] End of stream. has_tool_calls={has_tool_calls}, has_verified_plan={has_verified_plan}, has_spawned={has_spawned}")
         if not has_tool_calls:
             call_id = f"call_{uuid.uuid4().hex[:8]}"
-
-            # Workers don't need the Architect monitor loop
-            if not self.is_architect:
-                # Worker produced no tool call — just auto-finish
-                Logger.debug(f"[Watchdog] Worker '{self.agent_name}' produced no tool call. Auto-finishing.")
-                yield create_mock_tool_chunk(call_id, "finish",
-                    json.dumps({"reason": "Auto-finishing: Worker produced no tool call."}, ensure_ascii=False))
-                return
-
             mission_status = self._check_mission_status()
-            Logger.debug(f"[Watchdog] Mission Status: {mission_status}")
+            Logger.info(f"[ArchitectGuard] End-of-stream: mission_status={mission_status}")
 
             # 1. Mission DONE → auto-finish
             if mission_status == "DONE":
-                Logger.debug("[Watchdog] Auto-finishing (DONE)")
+                Logger.info("[ArchitectGuard] ACTION: Auto-injecting finish (mission DONE)")
                 yield create_mock_tool_chunk(call_id, "finish",
                     json.dumps({"reason": "Auto-finishing as Mission Status is DONE."}, ensure_ascii=False))
 
-            # 2. All tasks DONE but mission not marked → prompt closure
+            # 2. All tasks DONE but mission not marked → prompt Architect to close out
             elif mission_status == "ALL_TASKS_DONE":
-                Logger.info("[Watchdog] All tasks DONE, prompting mission closure.")
+                Logger.info("[ArchitectGuard] All tasks DONE, prompting mission closure.")
                 yield create_mock_tool_chunk(call_id, "wait", json.dumps({
-                    "duration": 0.1, "wait_for_new_index": False,
+                    "duration": 0.5, "wait_for_new_index": False,
                     "reason": "[ALL TASKS COMPLETED] Every task in `central_plan.md` is now DONE. "
                               "You MUST finalize the mission immediately:\n"
                               "1. Call `blackboard(operation=\"update_index\", name=\"central_plan.md\", ...)` "
@@ -380,22 +390,28 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                               "Do NOT spawn more agents or wait — just close the mission."
                 }, ensure_ascii=False))
 
-            # 3. Plan not verified → inject ask_user
+            # 3. Plan not verified → remind protocol
             elif not has_verified_plan:
-                Logger.info(f"[{self.agent_name}] Guard: No tool call, plan not verified. Injecting 'ask_user'.")
-                prompt = captured_content.strip() if captured_content.strip() else \
-                    "I have drafted a plan. Could you please review and confirm before I proceed?"
-                yield create_mock_tool_chunk(call_id, "ask_user", json.dumps({"question": prompt}, ensure_ascii=False))
+                Logger.info(f"[{self.agent_name}] Guard: No tool call, plan not verified. Injecting wait.")
+                yield create_mock_tool_chunk(call_id, "wait", json.dumps({
+                    "duration": 0.5, "wait_for_new_index": False,
+                    "reason": "[PROTOCOL REMINDER] You produced no action this turn. "
+                              "Please follow the protocol:\n"
+                              "1. Call `blackboard(operation=\"create_index\", name=\"central_plan.md\", ...)` to create the plan.\n"
+                              "2. Call `ask_user(question=\"...\")` to confirm your plan with the user.\n"
+                              "3. Call `spawn_swarm_agent(...)` to launch Workers.\n"
+                              "You must complete these steps in order."
+                }, ensure_ascii=False))
 
             # 4. Mission in progress — monitor loop
             else:
                 anyone_else = self._is_anyone_else_running()
-                Logger.debug(f"[Watchdog] Anyone else running: {anyone_else}")
+                Logger.debug(f"[ArchitectGuard] Anyone else running: {anyone_else}")
 
                 if anyone_else:
                     self._no_agent_strike_count = 0
                     yield create_mock_tool_chunk(call_id, "wait", json.dumps({
-                        "duration": 10, "wait_for_new_index": True,
+                        "duration": 30, "wait_for_new_index": True,
                         "reason": "Sub-agents are still working. Waiting for blackboard updates. "
                                   "After waking, call `blackboard(operation=\"read_index\", name=\"central_plan.md\")` "
                                   "to check task progress."
@@ -403,7 +419,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                 else:
                     self._no_agent_strike_count += 1
                     strikes = self._no_agent_strike_count
-                    Logger.info(f"[Watchdog] No agent running, strike {strikes}/{self.MAX_NO_AGENT_STRIKES}")
+                    Logger.info(f"[ArchitectGuard] No agent running, strike {strikes}/{self.MAX_NO_AGENT_STRIKES}")
 
                     if strikes >= self.MAX_NO_AGENT_STRIKES:
                         self._no_agent_strike_count = 0
@@ -435,5 +451,5 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
                         )
 
                     yield create_mock_tool_chunk(call_id, "wait", json.dumps({
-                        "duration": 10, "wait_for_new_index": True, "reason": reason
+                        "duration": 30, "wait_for_new_index": True, "reason": reason
                     }, ensure_ascii=False))

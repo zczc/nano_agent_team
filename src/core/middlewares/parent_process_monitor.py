@@ -36,6 +36,7 @@ class ParentProcessMonitorMiddleware(StrategyMiddleware):
         self.blackboard_dir = blackboard_dir
         self.parent_agent_name = parent_agent_name
         self._registry = RegistryManager(blackboard_dir)
+        self._terminating = False
         if self.parent_pid and self.parent_pid > 0:
             Logger.info(f"Initialized ParentProcessMonitorMiddleware for {self.agent_name}: watching parent PID {self.parent_pid} (agent: {self.parent_agent_name})")
 
@@ -91,6 +92,9 @@ class ParentProcessMonitorMiddleware(StrategyMiddleware):
 
     def _terminate_self(self, reason: str):
         """Perform cleanup and terminate the current process."""
+        if self._terminating:
+            return
+        self._terminating = True
         try:
             RuntimeManager.cleanup_agent(
                 name=self.agent_name,

@@ -58,6 +58,21 @@ class WriteFileTool(BaseTool):
         if not self.env:
             return "Error: No execution environment configured."
 
+        # Check if trying to modify global_indices/ files
+        normalized_path = os.path.normpath(file_path)
+        blackboard_files = ["central_plan.md", "notifications.md", "agent_registry.md"]
+
+        # Check if path contains global_indices/ or is a blackboard coordination file
+        if "global_indices" in normalized_path or any(normalized_path.endswith(bf) for bf in blackboard_files):
+            return (
+                f"❌ Error: Cannot use write_file to modify blackboard coordination files: {file_path}\n\n"
+                f"Please use the appropriate blackboard tool instead:\n"
+                f"  - To modify task status → blackboard(operation='update_task', ...)\n"
+                f"  - To append notifications → blackboard(operation='append_to_index', filename='notifications.md', ...)\n"
+                f"  - To register agent → blackboard(operation='register_agent', ...)\n\n"
+                f"These tools support CAS (Compare-And-Swap) to prevent concurrent conflicts."
+            )
+
         try:
             # Handle Append Logic manually if environment doesn't support 'append' natively in write_file
             # Environment.write_file usually overwrites.

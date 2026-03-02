@@ -164,6 +164,7 @@ class Config:
     def load_keys(cls, keys_path: str):
         """Load keys.json and inject configuration"""
         if not keys_path or not os.path.exists(keys_path):
+            print(f"[Config] Error loading keys: {keys_path} not found")
             return 
             
         try:

@@ -20,9 +20,10 @@ from backend.llm.types import SystemPromptConfig
 from backend.llm.events import AgentEvent
 from backend.llm.middleware import ExecutionBudgetManager, InteractionRefinementMiddleware
 from src.core.middlewares import (
-    WatchdogGuardMiddleware, 
-    DependencyGuardMiddleware, 
-    MailboxMiddleware, 
+    ArchitectGuardMiddleware,
+    WorkerGuardMiddleware,
+    DependencyGuardMiddleware,
+    MailboxMiddleware,
     SwarmStateMiddleware,
     NotificationAwarenessMiddleware,
     ActivityLoggerMiddleware
@@ -50,7 +51,7 @@ class AgentConfig:
     session_id: Optional[str] = None
     scenario: str = "You are the Root Architect. Analyze the mission, design the blackboard indices, and spawn agents to execute it."
     # Swarm max iterations (default matches main.py)
-    swarm_max_iterations: int = 200
+    swarm_max_iterations: int = 400
     # Auto-load architect.md for Swarm mode
     use_architect_prompt: bool = True
 
@@ -257,14 +258,22 @@ class AgentBridge:
         bb_dir = Config.BLACKBOARD_ROOT
             
         self._swarm_agent = SwarmAgent(
-
             role=swarm_role,
             name=self.config.swarm_name,
             blackboard_dir=bb_dir,
             model=self.config.model_key,
-            max_iterations=self.config.swarm_max_iterations  # Use swarm-specific iterations
+            max_iterations=self.config.swarm_max_iterations
         )
-        
+
+        # Re-configure tools with is_architect flag
+        for tool in self._swarm_agent.tools:
+            if hasattr(tool, 'configure'):
+                tool.configure({
+                    "agent_model": self.config.model_key,
+                    "agent_name": self.config.swarm_name,
+                    "is_architect": self.config.use_architect_prompt
+                })
+
         # Inject input callback into existing AskUserTool if present
         if hasattr(self, '_input_callback') and self._input_callback:
             for tool in self._swarm_agent.tools:
@@ -301,15 +310,17 @@ class AgentBridge:
         )
         self._swarm_agent.add_strategy(request_monitor)
         
-        # [FIX] Add WatchdogGuardMiddleware to enforce safety protocols (prevents early exit, non-tool deadlocks)
-        # This aligns TUI Swarm mode with CLI Watchdog behavior.
-        # Workers (use_architect_prompt=False) skip user verification so they can freely write files.
-        self._swarm_agent.add_strategy(WatchdogGuardMiddleware(
-            agent_name=self.config.swarm_name,
-            blackboard_dir=bb_dir,
-            critical_tools=["spawn_swarm_agent"],
-            skip_user_verification=not self.config.use_architect_prompt
-        ))
+        # Add role-specific guard middleware
+        if self.config.use_architect_prompt:
+            self._swarm_agent.add_strategy(ArchitectGuardMiddleware(
+                agent_name=self.config.swarm_name,
+                blackboard_dir=bb_dir
+            ))
+        else:
+            self._swarm_agent.add_strategy(WorkerGuardMiddleware(
+                agent_name=self.config.swarm_name,
+                blackboard_dir=bb_dir
+            ))
         
         self._chat_engine = None
     
@@ -363,6 +374,8 @@ class AgentBridge:
         try:
             for event in event_generator:
                 if not self._is_running:
+                    from backend.utils.logger import Logger
+                    Logger.info(f"[Bridge] EXIT REASON: _is_running=False detected in _process_events. Closing generator and yielding [Stopped].")
                     event_generator.close()
                     yield ChatMessage(role="assistant", content="[Stopped]")
                     break
@@ -471,6 +484,8 @@ class AgentBridge:
                         
                         # Check for finish tool (Swarm mode only)
                         if handle_finish_tool:
+                            from backend.utils.logger import Logger
+                            Logger.info(f"[Bridge] EXIT REASON: finish tool detected in swarm mode. Yielding [Swarm Agent Finished] and breaking.")
                             yield ChatMessage(role="assistant", content="[Swarm Agent Finished]")
                             break
                     
@@ -564,10 +579,16 @@ class AgentBridge:
             )
 
         except KeyboardInterrupt:
+            from backend.utils.logger import Logger
+            Logger.info(f"[Bridge] EXIT REASON: KeyboardInterrupt in _send_message_swarm.")
             yield ChatMessage(role="assistant", content="[Interrupted]")
         except Exception as e:
+            from backend.utils.logger import Logger
+            Logger.info(f"[Bridge] EXIT REASON: Exception in _send_message_swarm: {e}")
             yield ChatMessage(role="assistant", content=f"Error: {str(e)}", is_error=True)
         finally:
+            from backend.utils.logger import Logger
+            Logger.info(f"[Bridge] _send_message_swarm finally block: setting _is_running=False, deregistering swarm agent.")
             self._is_running = False
             # Lifecycle: Mark as DEAD when swarm run completes.
             # History lives in state.agent_messages (in-memory), not in registry,
@@ -578,10 +599,15 @@ class AgentBridge:
     
     def stop(self):
         """Stop the current agent execution immediately (ctrl+K style)"""
+        import traceback
+        from backend.utils.logger import Logger
+        caller_stack = ''.join(traceback.format_stack()[-4:-1])
+        Logger.info(f"[Bridge] stop() called! Setting _is_running=False. Caller:\n{caller_stack}")
         self._is_running = False
 
         # Force close the current event generator to stop blocking API calls
         if self._current_generator:
+            Logger.info(f"[Bridge] stop(): Force-closing current event generator.")
             try:
                 self._current_generator.close()
             except Exception:
