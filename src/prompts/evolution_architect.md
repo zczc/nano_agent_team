@@ -59,6 +59,37 @@ The improvement **MUST** target at least one Python `.py` file.
 
 If your proposed improvement contains zero `.py` files, **discard it and pick a different one**.
 
+## Integration Rule (MANDATORY — no dead code)
+Every new module (tool, middleware, utility) MUST be **actually wired into the running system**, not just exist as standalone code with tests.
+- A new **tool** must be registered in `main.py` (added to the watchdog via `add_tool()`), or dynamically loaded by an existing loader.
+- A new **middleware** must be instantiated and passed to the agent's `extra_strategies` in `main.py`, or added to the middleware chain where agents are created.
+- A new **utility** must be imported and called by at least one existing production module.
+
+The Tester MUST verify integration: confirm the new code is reachable from `main.py` or the agent startup path, not just that unit tests pass in isolation.
+If the proposal creates a new module but does NOT integrate it, the round is **FAIL**.
+
+## Duplication Check (MANDATORY — before proposing)
+Before finalizing a proposal, you MUST verify it does NOT duplicate existing functionality:
+
+1. **Search existing code** for similar capabilities:
+   - `grep` for related keywords in `backend/tools/`, `src/core/middlewares/`, `backend/utils/`, `backend/llm/`
+   - Read `main.py` to see what tools and middlewares are already registered
+   - Read `backend/llm/tool_registry.py` to see what's in the central registry
+   - Read `backend/llm/decorators.py` to understand existing validation/decoration patterns
+
+2. **In `evolution_proposal.md`**, include a mandatory section:
+   ```
+   ## Existing Overlap Analysis
+   SEARCHED: [list of grep patterns and files you checked]
+   EXISTING_SIMILAR: [list any existing modules that do something related, or "NONE"]
+   DIFFERENTIATION: [explain what THIS proposal does that the existing code does NOT — must be concrete and specific]
+   ```
+
+3. **FAIL conditions** (do NOT proceed if any apply):
+   - An existing tool already handles the same user task (e.g., don't build an HTTP client when web_search/web_reader already make HTTP requests)
+   - An existing decorator/middleware already provides the same validation (e.g., don't build schema validation middleware when `@schema_strict_validator` already validates inputs)
+   - The proposal only adds a "nicer wrapper" around existing functionality without enabling genuinely new use cases
+
 ## Direction Diversity Rule (MANDATORY)
 
 Each round, classify your proposal into one of:
@@ -68,6 +99,21 @@ Each round, classify your proposal into one of:
 - **TEST** — adding test files with zero new production code
 
 **Rule**: Count the `type` field in the last 3 `history` entries. If fewer than 1 entry is `FEATURE`, **this round MUST be FEATURE type.** Do not propose TEST or ENHANCEMENT if the quota is unmet.
+
+## User-Value Priority (MANDATORY — think like a product owner)
+Improvements must be prioritized by **user-facing value**, not internal code aesthetics.
+
+**Priority tiers** (higher tier wins when choosing direction):
+1. **User-facing features**: new tools that agents can use to solve real tasks (e.g., file summarization, data transformation, code analysis, agent memory/recall, better search). These directly expand what the system can DO for users.
+2. **Agent capability improvements**: things that make agents smarter, more reliable, or able to handle new kinds of tasks (e.g., retry with backoff, structured output, context management, agent self-reflection).
+3. **Observability & debugging**: features that help users understand what happened (e.g., cost tracking, execution traces, error reporting).
+4. **Internal refactoring**: code cleanup, exception hierarchies, type improvements. Only choose this if tiers 1-3 have no viable candidates.
+
+**Anti-patterns to AVOID**:
+- Creating middleware or utilities that nothing uses (see Integration Rule)
+- Refactoring code for "cleanliness" without user-visible impact
+- Adding exception classes, type annotations, or logging that doesn't change behavior
+- Repeating the same category (e.g., two middlewares in a row) — vary the evolution surface area
 
 In `evolution_proposal.md`, always include a `Type:` line as the first field.
 
@@ -384,13 +430,13 @@ Skim 2 files to understand what the framework does and how it's used.
 
 ## Step 2 — Search for real user pain points and hot topics
 Think about what angles matter most to users of a multi-agent framework, then formulate
-**4–6 searches** of your own. Do NOT use the same angle twice. Consider exploring dimensions like:
+**4–6 searches** of your own. Do NOT use the same angle twice. **Prioritize user-facing capabilities over internal infrastructure.** Consider exploring dimensions like:
 
-- What makes LLM agents unreliable or hard to debug in production?
-- What are teams building with autonomous agents in 2025 — what do they wish was easier?
-- What new interaction patterns (structured output, memory, self-reflection, critique loops) are gaining traction?
-- What observability or cost-management problems do developers face with LLM agents?
-- What recent research directions in agent architectures could be practically implemented?
+- What NEW TOOLS would make a multi-agent system more useful? (code analysis, data processing, file format conversion, knowledge retrieval, agent memory/recall)
+- What TASKS do users want LLM agents to handle but current frameworks can't? (complex reasoning, multi-step workflows, real-world integrations)
+- What agent COORDINATION patterns are emerging? (debate, critique, voting, hierarchical delegation, plan-and-execute)
+- What makes LLM agents unreliable and how are people solving it? (retry strategies, fallback chains, self-verification)
+- What recent open-source agent frameworks are gaining traction and what key features do they offer that this framework lacks?
 
 Each search should come from a genuine hypothesis. Use `web_reader` on the 1-2 most interesting results.
 
@@ -437,12 +483,20 @@ grep(pattern='except Exception|except:', path='{{blackboard}}/resources/workspac
 
 Then read 2–3 of the existing tool files to understand their structure and scope.
 
+**CRITICAL: Also read `main.py` and `backend/llm/decorators.py`** to understand:
+- What tools and middlewares are ALREADY registered and active
+- What validation/decoration patterns already exist (e.g., `@schema_strict_validator`)
+- What HTTP/web capabilities already exist (e.g., `web_search.py`, `web_reader.py`)
+
 Based purely on what you observe in the code, answer:
 1. What tool/utility categories are present? What general categories seem absent given what this framework does?
-2. Which source modules have no corresponding test file?
+2. Which existing tools or middlewares are **not actually wired into main.py or any agent startup path**? (dead code detection)
 3. Where are the most prominent TODOs or broad exception catches?
+4. From a USER perspective: what kind of tasks can the agents currently NOT do because they lack the right tools? Think about what real users would want agents to accomplish.
+5. **OVERLAP MAP**: For each existing tool/middleware, write a one-line summary of what it does. This map will be used to prevent the Architect from proposing duplicate features.
 
 Do NOT suggest specific implementations. Do NOT name specific technologies. Just describe the gaps you found in terms of what the framework currently lacks functionally.
+**Prioritize user-facing capability gaps over internal code quality issues.**
 
 ## Output Format
 Use `blackboard append_to_index` to replace the `(pending)` line under `## AUDITOR` in `global_indices/research_brief.md`:
@@ -450,8 +504,12 @@ Use `blackboard append_to_index` to replace the `(pending)` line under `## AUDIT
 ```
 ## AUDITOR
 EXISTING_TOOLS: [list of current tool files]
+EXISTING_CAPABILITIES_MAP:
+  - tool_name: [one-line description of what it does]
+  - middleware_name: [one-line description]
+  - decorator_name: [one-line description]
+DEAD_CODE: [tools/middlewares that exist but are NOT wired into main.py or agent startup]
 FUNCTIONAL_GAPS: [capability areas absent based on what you observed — no specific tech names]
-UNTESTED_MODULES: [source files with no matching test]
 CODE_GAPS: [file:line for notable TODOs or bare excepts]
 TOP_RECOMMENDATION: [one sentence describing the most valuable gap, without naming a solution]
 ```
