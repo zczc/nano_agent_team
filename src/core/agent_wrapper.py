@@ -206,10 +206,14 @@ class SwarmAgent:
 
                             # Check for termination signal
                             if event.type == "tool_result" and event.data.get("name") == "finish":
+                                 from backend.utils.logger import Logger
+                                 Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: finish tool detected after {iteration_count} tool calls.")
                                  print(f"[{self.name}] Detected 'finish' tool call after {iteration_count} tool calls. Stopping loop.")
                                  return  # Normal exit, don't retry
 
                         except StopIteration:
+                            from backend.utils.logger import Logger
+                            Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: StopIteration (generator exhausted) after {iteration_count} tool calls. max_iterations={self.max_iterations}, run_limit={run_limit}")
                             print(f"[{self.name}] Agent loop completed after {iteration_count} tool calls (max_iterations={self.max_iterations}).")
                             if iteration_count >= self.max_iterations:
                                 print(f"[{self.name}] WARNING: Agent terminated because max_iterations ({self.max_iterations}) was reached. Tasks may be incomplete.")
@@ -217,10 +221,14 @@ class SwarmAgent:
                             return  # Normal completion, don't retry
 
                 except KeyboardInterrupt:
+                    from backend.utils.logger import Logger
+                    Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: KeyboardInterrupt.")
                     print(f"\n[{self.name}] Interrupted by user.")
                     return  # User interrupt, don't retry
 
                 except Exception as e:
+                    from backend.utils.logger import Logger
+                    Logger.info(f"[Worker {self.name} PID={os.getpid()}] EXIT REASON: Exception: {e}")
                     error_msg = str(e).lower()
                     print(f"[{self.name}] Exception in agent loop: {e}")
 

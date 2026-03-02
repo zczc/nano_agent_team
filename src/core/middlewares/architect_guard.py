@@ -278,6 +278,7 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                             has_plan = os.path.exists(plan_path)
 
                             if not has_plan:
+                                Logger.info(f"[ArchitectGuard] Rule A BLOCKED: spawn_swarm_agent — no central_plan.md")
                                 replace_mode = True
                                 replacement_tool_index = tc.index
                                 tc.function.name = "wait"
@@ -292,6 +293,7 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                                 modified_tool_calls.append(tc)
 
                             elif not has_verified_plan:
+                                Logger.info(f"[ArchitectGuard] Rule A BLOCKED: spawn_swarm_agent — plan not verified by ask_user")
                                 replace_mode = True
                                 replacement_tool_index = tc.index
                                 tc.function.name = "wait"
@@ -324,7 +326,9 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
                         # Rule B: Finish blocked while tasks still incomplete
                         elif tool_name == "finish":
                             mission_status = self._check_mission_status()
+                            Logger.info(f"[ArchitectGuard] Rule B: finish requested, mission_status={mission_status}")
                             if mission_status == "IN_PROGRESS":
+                                Logger.info(f"[ArchitectGuard] Rule B BLOCKED: finish — mission still IN_PROGRESS")
                                 replace_mode = True
                                 replacement_tool_index = tc.index
                                 tc.function.name = "wait"
@@ -361,15 +365,15 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
         # ------------------------------------------------------------------
         # End-of-stream phase
         # ------------------------------------------------------------------
-        Logger.debug(f"[ArchitectGuard] End of stream. has_tool_calls={has_tool_calls}")
+        Logger.info(f"[ArchitectGuard] End of stream. has_tool_calls={has_tool_calls}, has_verified_plan={has_verified_plan}, has_spawned={has_spawned}")
         if not has_tool_calls:
             call_id = f"call_{uuid.uuid4().hex[:8]}"
             mission_status = self._check_mission_status()
-            Logger.debug(f"[ArchitectGuard] Mission Status: {mission_status}")
+            Logger.info(f"[ArchitectGuard] End-of-stream: mission_status={mission_status}")
 
             # 1. Mission DONE → auto-finish
             if mission_status == "DONE":
-                Logger.debug("[ArchitectGuard] Auto-finishing (DONE)")
+                Logger.info("[ArchitectGuard] ACTION: Auto-injecting finish (mission DONE)")
                 yield create_mock_tool_chunk(call_id, "finish",
                     json.dumps({"reason": "Auto-finishing as Mission Status is DONE."}, ensure_ascii=False))
 

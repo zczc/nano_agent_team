@@ -724,7 +724,12 @@ class AgentMonitorScreen(Screen):
         try:
             # Use file lock for safe concurrent access
             from src.utils.file_lock import file_lock
-            
+
+            # Create mailbox file if it doesn't exist ('r+' mode requires existing file)
+            if not os.path.exists(mailbox_path):
+                with open(mailbox_path, 'w', encoding='utf-8') as f:
+                    json.dump([], f)
+
             with file_lock(mailbox_path, 'r+', fcntl.LOCK_EX, timeout=5) as fd:
                 if fd is None:
                     Logger.error(f"[Monitor] Failed to acquire lock for mailbox {agent_name}")
