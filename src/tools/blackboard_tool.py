@@ -13,6 +13,7 @@ from backend.tools.base import BaseTool
 from src.utils.file_lock import file_lock, LockTimeoutError
 from backend.llm.decorators import schema_strict_validator
 from src.core.protocol import parse_frontmatter
+from backend.utils.logger import Logger
 
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
