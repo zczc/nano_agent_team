@@ -52,8 +52,6 @@ class BlackboardTool(BaseTool):
         """Inject agent identity for access control."""
         self._agent_name = context.get("agent_name")
         self._is_architect = context.get("is_architect", False)
-        if not self._is_architect and self._agent_name:
-            self._is_architect = "architect" in self._agent_name.lower()
 
     @property
     def name(self) -> str:

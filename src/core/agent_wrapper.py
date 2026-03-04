@@ -55,7 +55,8 @@ class SwarmAgent:
         blackboard_dir: str = ".blackboard",
         model: str = None,
         max_iterations: int = 200,
-        extra_strategies: List[Any] = None
+        extra_strategies: List[Any] = None,
+        is_architect: bool = False
     ):
         self.role = role
         self.name = name
@@ -104,13 +105,13 @@ class SwarmAgent:
             
         self.engine = AgentEngine(tools=self.tools, strategies=strategies, provider_key=model)
         
-        # Configure tools with agent name for context propagation (e.g., for spawn_tool)
+        # Configure tools with agent identity for context propagation
         for tool in self.tools:
             if hasattr(tool, 'configure'):
                 tool.configure({
                     "agent_model": model,
                     "agent_name": name,
-                    "is_architect": False  # Workers are not architects; overridden by agent_bridge for Architect
+                    "is_architect": is_architect
                 })
 
         # Register SIGTERM handler for graceful shutdown (cleanup registry before exit)
