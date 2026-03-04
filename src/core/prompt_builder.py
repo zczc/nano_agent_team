@@ -25,6 +25,7 @@ class PromptBuilder:
         sections = [
             self._get_core_prompt(),
             self._get_system_context(),
+            self._get_skills_prompt(),
             self._get_indices_prompt(),
             self._get_templates_prompt(),
             self._get_role_prompt(role_definition),
@@ -211,6 +212,43 @@ You interact with other agents and the system by reading and writing files.
             return ""
             
         return "## AVAILABLE TEMPLATES\nThe following templates are available in `{{root_path}}/blackboard_templates/`. Use `blackboard_tool.read_template(name)` to read them:\n" + "\n".join([f"- {t}" for t in templates])
+
+    def _get_skills_prompt(self) -> str:
+        # Assuming the .skills folder is located in the root path, which is one level up from blackboard_dir
+        root_path = os.path.dirname(os.path.normpath(self.blackboard_dir))
+        skills_dir = os.path.join(root_path, ".skills")
+
+        if not os.path.exists(skills_dir):
+            return ""
+
+        skills_info = []
+        for folder_name in os.listdir(skills_dir):
+            skill_folder = os.path.join(skills_dir, folder_name)
+            if not os.path.isdir(skill_folder):
+                continue
+
+            skill_md_path = os.path.join(skill_folder, "SKILL.md")
+            if os.path.exists(skill_md_path):
+                try:
+                    with open(skill_md_path, 'r', encoding='utf-8') as f:
+                        content = f.read(2048)  # Read frontmatter
+                        meta, _ = parse_frontmatter(content)
+                        name = meta.get("name", folder_name)
+                        desc = meta.get("description", "No description provided.")
+                        skills_info.append(f"- **{name}**: {desc}")
+                except Exception:
+                    continue
+
+        if not skills_info:
+            return ""
+
+        return (
+            "## AVAILABLE SKILLS\n"
+            "The following specialized operating procedures (skills) are available to help you perform your tasks.\n"
+            "If you determine one of these is relevant, you **MUST** use the `activate_skill` tool to load its instructions.\n"
+            "Once activated, you must strictly follow its procedures.\n\n" +
+            "\n".join(skills_info)
+        )
 
     def _get_role_prompt(self, role: str) -> str:
         return f"# YOUR ROLE\n{role}"
