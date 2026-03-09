@@ -11,6 +11,13 @@ class FinishTool(BaseTool):
         self.agent_name = agent_name
         self.agent_role = agent_role
         self.blackboard_dir = blackboard_dir
+        self._is_architect = False
+
+    def configure(self, context: Dict[str, Any]):
+        """Receive runtime context including is_architect flag."""
+        self._is_architect = context.get("is_architect", False)
+        if context.get("agent_name"):
+            self.agent_name = context["agent_name"]
     @property
     def name(self) -> str:
         return "finish"
@@ -41,20 +48,21 @@ class FinishTool(BaseTool):
 
     @schema_strict_validator
     def execute(self, output: str, reason: str = None) -> str:
-        # Guard: block finish if an evolution workspace worktree still exists.
-        # This forces the Watchdog to call evolution_workspace() first.
+        # Guard: block the Architect from finishing while the evolution workspace worktree still exists.
+        # Sub-agents (Historian, Researcher, Developer, Tester, etc.) are exempt — they never own the workspace.
         import os
         from backend.infra.config import Config
-        workspace = os.path.join(Config.BLACKBOARD_ROOT, "resources", "workspace")
-        if os.path.isfile(os.path.join(workspace, ".git")):
-            return (
-                "BLOCKED: Evolution workspace worktree still exists.\n\n"
-                f"  {workspace}\n\n"
-                "You MUST call the 'evolution_workspace' tool first:\n"
-                "  - PASS: evolution_workspace(verdict='PASS', round_num=N, description='...', changed_files=[...])\n"
-                "  - FAIL: evolution_workspace(verdict='FAIL', round_num=N)\n\n"
-                "Do NOT call finish until the worktree is removed."
-            )
+        if self._is_architect:
+            workspace = os.path.join(Config.BLACKBOARD_ROOT, "resources", "workspace")
+            if os.path.isfile(os.path.join(workspace, ".git")):
+                return (
+                    "BLOCKED: Evolution workspace worktree still exists.\n\n"
+                    f"  {workspace}\n\n"
+                    "You MUST call the 'evolution_workspace' tool first:\n"
+                    "  - PASS: evolution_workspace(verdict='PASS', round_num=N, description='...', changed_files=[...])\n"
+                    "  - FAIL: evolution_workspace(verdict='FAIL', round_num=N)\n\n"
+                    "Do NOT call finish until the worktree is removed."
+                )
 
         # Check for incomplete tasks based on agent role
         task_check_result = self._check_incomplete_tasks()
@@ -93,7 +101,7 @@ class FinishTool(BaseTool):
                 return None
 
             # Check based on agent role
-            if self.agent_role and "architect" in self.agent_role.lower():
+            if self._is_architect:
                 # Architect: check ALL tasks
                 incomplete = [t for t in tasks if t.get("status") in ["PENDING", "IN_PROGRESS", "BLOCKED"]]
 
@@ -109,7 +117,7 @@ class FinishTool(BaseTool):
                         f"{task_list}{more}\n\n"
                         "As the Architect, you MUST ensure all tasks are DONE before calling finish.\n\n"
                         "Options:\n"
-                        "- Wait for Workers to complete tasks (use check_swarm_status or wait tool)\n"
+                        "- Wait for Workers to complete tasks (use the wait tool and registry status)\n"
                         "- Spawn new Workers for PENDING tasks (use spawn_swarm_agent)\n"
                         "- Mark tasks as DONE if they are actually complete (use blackboard update_task)\n"
                         "- Update task status to reflect reality if needed\n\n"
@@ -146,5 +154,4 @@ class FinishTool(BaseTool):
             return None
 
         return None
-
 
