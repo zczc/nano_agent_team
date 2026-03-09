@@ -6,7 +6,7 @@ colorama
 requests
 beautifulsoup4
 ddgs
-markitdown
+markitdown[pdf]
 PyYAML
 pydantic>=2.0.0
 langfuse>=2.0.0
@@ -18,3 +18,4 @@ playwright>=1.40.0
 nest-asyncio>=1.5.0
 python-socks>=2.0.0
 docker
+requests

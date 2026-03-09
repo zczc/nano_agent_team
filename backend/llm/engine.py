@@ -95,7 +95,7 @@ class AgentEngine:
         self.strategies = strategies if strategies is not None else [
             ContextOverflowMiddleware(),     # Outermost: catch context length errors, summarize and retry
             ErrorRecoveryMiddleware(),       # Handle connection errors and other exceptions
-            ToolResultCacheMiddleware(),     # Preventive compression of tool results
+            ToolResultCacheMiddleware(),     # HISTORY_STRATEGY_SWAP: replace with RuleSlidingWindowMiddleware() or LLMSlidingWindowMiddleware(summary_model="qwen/qwen-flash") from backend.llm.history_middleware
             LoopBreakerMiddleware(),
             SemanticDriftGuard(),
             ExecutionBudgetManager()
@@ -141,7 +141,8 @@ class AgentEngine:
             kwargs = {
                 "model": model,
                 "messages": messages,
-                "stream": True
+                "stream": True,
+                "stream_options": {"include_usage": True},
             }
             if session.tools:
                 kwargs["tools"] = [t.to_openai_schema() for t in session.tools]
@@ -280,6 +281,8 @@ class AgentEngine:
                         reasoning_content = ""
                         tool_calls = []
                         for chunk in stream:
+                            if not hasattr(chunk, 'choices') or not chunk.choices:
+                                continue
                             delta = chunk.choices[0].delta
                             if delta.tool_calls:
                                 for tc_chunk in delta.tool_calls:
@@ -379,8 +382,8 @@ class AgentEngine:
                         # Mock a tool result for non-existent tool to prevent crash
                         result = f"Error: Tool '{fn_name}' not found. Please check the tool name and try again."
 
-                    # Downgrade failed finish to wait — prevent engine from breaking on invalid finish
-                    if fn_name == "finish" and str(result).startswith("Error:"):
+                    # Downgrade failed/blocked finish to wait — prevent engine from breaking on invalid finish
+                    if fn_name == "finish" and (str(result).startswith("Error:") or str(result).startswith("BLOCKED:")):
                         Logger.info(f"[Engine PID={_engine_pid}] finish tool BLOCKED (downgraded to wait). Error: {str(result)[:200]}")
                         error_detail = str(result)
                         tc["function"]["name"] = "wait"
@@ -504,10 +507,9 @@ class AgentEngine:
             raise e
         finally:
             self.depth -= 1
-            # Clean up cache middleware
+            # Clean up middlewares
             for strategy in self.strategies:
-                if isinstance(strategy, ToolResultCacheMiddleware):
-                    strategy.cleanup()
+                strategy.cleanup()
 
     @observe(as_type="span")
     def invoke_agent(self, agent_name: str, query: str, history: List[Dict[str, Any]] = None, on_step_log: callable = None, forced_skill: str = None, return_full_history: bool = True) -> Generator[AgentEvent, None, None]:

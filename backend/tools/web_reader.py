@@ -10,6 +10,8 @@
 """
 
 import re
+import os
+import tempfile
 import requests
 from typing import Dict, Any
 from backend.tools.base import BaseTool
@@ -19,7 +21,28 @@ from backend.utils.logger import Logger
 
 MAX_RESPONSE_SIZE = 5 * 1024 * 1024   # 5MB — hard cap (reject)
 TRUNCATE_THRESHOLD = 1 * 1024 * 1024  # 1MB — truncation target for oversized pages
+MAX_RESULT_CHARS = 100_000             # 100K chars — cap for final output returned to LLM
 DEFAULT_TIMEOUT = 30
+
+# Content types that should be handled by MarkItDown instead of HTML conversion
+_BINARY_CONTENT_TYPES = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/msword": ".doc",
+}
+
+def _detect_binary_suffix(content_type: str, url: str) -> str | None:
+    """Return file suffix if content is a binary document, else None."""
+    ct_lower = content_type.lower().split(";")[0].strip()
+    if ct_lower in _BINARY_CONTENT_TYPES:
+        return _BINARY_CONTENT_TYPES[ct_lower]
+    url_lower = url.lower().split("?")[0]
+    for suffix in (".pdf", ".docx", ".pptx", ".xlsx", ".doc"):
+        if url_lower.endswith(suffix):
+            return suffix
+    return None
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -131,15 +154,20 @@ class WebReaderTool(BaseTool):
 
             resp.raise_for_status()
 
-            # 检查大小 — 超大响应先截断 HTML 再转换，而非硬拒绝
-            content = resp.text
             content_type = resp.headers.get("content-type", "")
+
+            # Binary document handling (PDF, DOCX, PPTX, XLSX)
+            suffix = _detect_binary_suffix(content_type, url)
+            if suffix:
+                return self._convert_binary(resp.content, suffix, url)
+
+            # HTML / text handling
+            content = resp.text
             is_html = "text/html" in content_type or "xhtml" in content_type
             truncated = False
 
             content_size = len(content.encode("utf-8", errors="ignore"))
             if content_size > MAX_RESPONSE_SIZE:
-                # 截断原始 HTML/text 到 TRUNCATE_THRESHOLD
                 content = content[:TRUNCATE_THRESHOLD]
                 truncated = True
                 Logger.info(f"[WebReader] Response truncated from {content_size} to ~{TRUNCATE_THRESHOLD} bytes")
@@ -156,6 +184,10 @@ class WebReaderTool(BaseTool):
                           f"to ~{TRUNCATE_THRESHOLD // 1024}KB due to size limit. "
                           f"The content below may be incomplete.]\n\n{result}")
 
+            # Cap final result size
+            if len(result) > MAX_RESULT_CHARS:
+                result = result[:MAX_RESULT_CHARS] + f"\n\n[TRUNCATED at {MAX_RESULT_CHARS} chars]"
+
             return result
 
         except requests.exceptions.Timeout:
@@ -164,6 +196,33 @@ class WebReaderTool(BaseTool):
             return f"Error: HTTP {e.response.status_code if e.response else '?'} - {e}"
         except Exception as e:
             return f"Error: {str(e)}"
+
+    def _convert_binary(self, raw_bytes: bytes, suffix: str, url: str) -> str:
+        """Convert binary document (PDF/DOCX/PPTX/XLSX) to markdown via MarkItDown."""
+        tmp_path = None
+        try:
+            from markitdown import MarkItDown
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(raw_bytes)
+                tmp_path = tmp.name
+
+            md = MarkItDown()
+            result = md.convert(tmp_path)
+            text = result.text_content
+
+            if len(text) > MAX_RESULT_CHARS:
+                text = text[:MAX_RESULT_CHARS] + f"\n\n[TRUNCATED at {MAX_RESULT_CHARS} chars]"
+
+            return f"[Converted {suffix} from {url}]\n\n{text}"
+
+        except ImportError:
+            return (f"Error: MarkItDown PDF support not installed. "
+                    f"Run: pip install 'markitdown[pdf]'")
+        except Exception as e:
+            return f"Error converting {suffix} document: {e}"
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
 
 # ---------------------------------------------------------------------------
