@@ -142,7 +142,8 @@ class WorkerGuardMiddleware(StrategyMiddleware):
 
                 if modified_tool_calls:
                     try:
-                        chunk.choices[0].delta.tool_calls = modified_tool_calls
+                        if hasattr(chunk, 'choices') and chunk.choices:
+                            chunk.choices[0].delta.tool_calls = modified_tool_calls
                         yield chunk
                     except Exception:
                         yield chunk

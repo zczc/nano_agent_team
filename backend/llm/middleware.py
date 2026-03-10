@@ -82,6 +82,10 @@ class StrategyMiddleware(ABC):
         """
         pass
 
+    def cleanup(self):
+        """Optional cleanup hook called when the engine run ends. Override if needed."""
+        pass
+
 class LoopBreakerMiddleware(StrategyMiddleware):
     """
     Loop Detection Middleware
@@ -530,6 +534,9 @@ Provide a dense, factual summary:"""
                 max_tokens=self.summary_max_tokens
             )
 
+            if not response.choices:
+                Logger.warning("LLM summarization returned empty choices, skipping summary")
+                raise RuntimeError("LLM summarization returned empty choices")
             return response.choices[0].message.content
         except Exception as e:
             Logger.error(f"LLM summarization failed: {e}")
@@ -633,7 +640,8 @@ class ErrorRecoveryMiddleware(StrategyMiddleware):
         connection_keywords = [
             'connection', 'timeout', 'network', 'refused',
             'unreachable', 'timed out', 'temporary failure',
-            'connection error', 'connect timeout', 'read timeout'
+            'connection error', 'connect timeout', 'read timeout',
+            'rate limit', 'ratelimit', 'too many requests', '429', 'quota exceeded',
         ]
         return any(keyword in error_msg for keyword in connection_keywords)
 

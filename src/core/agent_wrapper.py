@@ -17,12 +17,13 @@ from backend.llm.engine import AgentEngine
 from backend.infra.config import Config
 from backend.llm.types import SystemPromptConfig
 from backend.llm.middleware import (
-    ExecutionBudgetManager, 
+    ExecutionBudgetManager,
     InteractionRefinementMiddleware,
     ErrorRecoveryMiddleware,
     LoopBreakerMiddleware,
     ToolResultCacheMiddleware
 )
+from backend.llm.history_middleware import RuleSlidingWindowMiddleware, LLMSlidingWindowMiddleware
 from backend.tools.base import BaseTool
 
 from src.tools.ask_user_tool import AskUserTool
@@ -85,7 +86,9 @@ class SwarmAgent:
         # Initialize Engine with specific strategies
         strategies = [
             ErrorRecoveryMiddleware(),
-            ToolResultCacheMiddleware(),
+            # ToolResultCacheMiddleware(),  # HISTORY_STRATEGY_SWAP: replace with RuleSlidingWindowMiddleware() or LLMSlidingWindowMiddleware(summary_model="qwen/qwen-flash") from backend.llm.history_middleware
+            # RuleSlidingWindowMiddleware(),
+            LLMSlidingWindowMiddleware(),
             LoopBreakerMiddleware(),
             InteractionRefinementMiddleware(),
             DependencyGuardMiddleware(blackboard_dir),
@@ -163,6 +166,7 @@ class SwarmAgent:
         # Resolve path variables in system prompt so LLM knows the actual paths
         sys_prompt_content = sys_prompt_content.replace("{{blackboard}}", os.path.abspath(self.blackboard_dir))
         sys_prompt_content = sys_prompt_content.replace("{{root_path}}", Config.ROOT_PATH)
+        sys_prompt_content = sys_prompt_content.replace("{{agent_name}}", self.name)
 
         system_config = SystemPromptConfig(base_prompt=sys_prompt_content)
 
@@ -236,7 +240,8 @@ class SwarmAgent:
                     # Check if this is a recoverable connection error
                     is_connection_error = any(keyword in error_msg for keyword in [
                         'connection', 'timeout', 'network', 'refused',
-                        'unreachable', 'timed out', 'temporary failure'
+                        'unreachable', 'timed out', 'temporary failure',
+                        'rate limit', 'ratelimit', 'too many requests', '429', 'quota exceeded',
                     ])
 
                     if is_connection_error and engine_retry_count < max_engine_retries - 1:

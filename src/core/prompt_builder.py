@@ -25,10 +25,10 @@ class PromptBuilder:
         sections = [
             self._get_core_prompt(),
             self._get_system_context(),
-            self._get_skills_prompt(),
             self._get_indices_prompt(),
             self._get_templates_prompt(),
             self._get_role_prompt(role_definition),
+            self._get_skills_prompt(),
             self._get_scenario_prompt(scenario_context)
         ]
         return "\n\n".join([s for s in sections if s])

@@ -35,6 +35,7 @@ from backend.llm.types import AgentSession, SystemPromptConfig
 from backend.llm.providers import LLMFactory
 from backend.infra.config import Config
 from backend.llm.middleware import StrategyMiddleware, LoopBreakerMiddleware, SemanticDriftGuard, ExecutionBudgetManager, ToolResultCacheMiddleware, ErrorRecoveryMiddleware, ContextOverflowMiddleware
+from backend.llm.history_middleware import RuleSlidingWindowMiddleware, LLMSlidingWindowMiddleware
 from backend.tools.base import BaseTool
 from backend.utils.logger import Logger
 from backend.utils.langfuse_manager import observe
@@ -95,7 +96,9 @@ class AgentEngine:
         self.strategies = strategies if strategies is not None else [
             ContextOverflowMiddleware(),     # Outermost: catch context length errors, summarize and retry
             ErrorRecoveryMiddleware(),       # Handle connection errors and other exceptions
-            ToolResultCacheMiddleware(),     # HISTORY_STRATEGY_SWAP: replace with RuleSlidingWindowMiddleware() or LLMSlidingWindowMiddleware(summary_model="qwen/qwen-flash") from backend.llm.history_middleware
+            # ToolResultCacheMiddleware(),  # HISTORY_STRATEGY_SWAP: replace with RuleSlidingWindowMiddleware() or LLMSlidingWindowMiddleware(summary_model="qwen/qwen-flash") from backend.llm.history_middleware
+            # RuleSlidingWindowMiddleware(),
+            LLMSlidingWindowMiddleware(),
             LoopBreakerMiddleware(),
             SemanticDriftGuard(),
             ExecutionBudgetManager()
