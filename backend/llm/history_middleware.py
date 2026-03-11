@@ -1,19 +1,16 @@
 """
 Sliding Window History Middlewares
 
-Two alternative strategies for managing conversation history to reduce token consumption.
-Both replace ToolResultCacheMiddleware in the middleware chain.
+Two-phase approach (inspired by OpenCode & Claude Code compaction):
+  Phase 1 — Incremental pruning: clear old tool results in-place (every turn, zero cost)
+  Phase 2 — Sliding window: when history exceeds window, summarize expired messages via LLM
 
 Usage:
-    # Option 1 (default): ToolResultCacheMiddleware — only compresses large tool results
-    from backend.llm.middleware import ToolResultCacheMiddleware
-    strategies = [..., ToolResultCacheMiddleware(), ...]
-
-    # Option 2: Rule-based sliding window — zero extra LLM cost
+    # Option 1: Rule-based sliding window — zero extra LLM cost
     from backend.llm.history_middleware import RuleSlidingWindowMiddleware
     strategies = [..., RuleSlidingWindowMiddleware(), ...]
 
-    # Option 3: LLM-summarized sliding window — small extra cost, better quality
+    # Option 2: LLM-summarized sliding window — small extra cost, better quality
     from backend.llm.history_middleware import LLMSlidingWindowMiddleware
     strategies = [..., LLMSlidingWindowMiddleware(summary_model="qwen/qwen-flash"), ...]
 """
@@ -23,58 +20,55 @@ from backend.llm.middleware import StrategyMiddleware
 from backend.llm.types import AgentSession
 from backend.utils.logger import Logger
 
+
 _SUMMARY_MARKER = "[Conversation history summary]"
+_CLEARED_MARKER = "[Cleared]"
 
 
 class _SlidingWindowBase(StrategyMiddleware):
     """
     Base class for sliding window history management.
 
-    Maintains a fixed-size window of recent messages. When history exceeds
-    the window, older messages are summarized and kept as a single message
-    at the front. Tool results within the window are compressed after
-    the LLM has consumed them.
+    Phase 1 — Tool result pruning (every call, zero cost):
+        After the LLM has consumed a tool result (N subsequent assistant turns),
+        replace the content with a short "[Cleared]" marker.
+        This is the same strategy OpenCode uses ("Old tool result content cleared").
+
+    Phase 2 — Window sliding (when history overflows):
+        Summarize expired messages and pin the user's original task at the front.
+        Layout after sliding: [assistant(summary), user(pinned_task), ...window...]
     """
 
     def __init__(self,
-                 window_size: int = 15,
-                 compress_after_turns: int = 1,
-                 compress_threshold: int = 1500,
-                 preview_head: int = 300,
-                 preview_tail: int = 150,
-                 max_summary_chars: int = 4000):
+                 window_size: int = 40,
+                 clear_after_turns: int = 2,
+                 clear_threshold: int = 500,
+                 max_summary_chars: int = 8000):
         """
         Args:
             window_size: Number of recent messages to keep in full.
-            compress_after_turns: Compress tool results after this many assistant turns.
-            compress_threshold: Only compress tool results larger than this (chars).
-            preview_head: Characters to keep from start of compressed content.
-            preview_tail: Characters to keep from end of compressed content.
+            clear_after_turns: Clear tool results after this many subsequent assistant turns.
+            clear_threshold: Only clear tool results larger than this (chars).
             max_summary_chars: Maximum character length for the accumulated summary block.
         """
         self.window_size = window_size
-        self.compress_after_turns = compress_after_turns
-        self.compress_threshold = compress_threshold
-        self.preview_head = preview_head
-        self.preview_tail = preview_tail
+        self.clear_after_turns = clear_after_turns
+        self.clear_threshold = clear_threshold
         self.max_summary_chars = max_summary_chars
 
     def __call__(self, session: AgentSession, next_call: Callable[[AgentSession], Any]) -> Any:
         history = session.history
 
-        # Step 1: Compress tool results that the LLM has already consumed
-        self._compress_tool_results(history)
+        # Phase 1: Clear old tool results (incremental, every call)
+        self._clear_old_tool_results(history)
 
-        # Step 2: Slide window if history exceeds limit
+        # Phase 2: Slide window if history exceeds limit
         #
         # After sliding, the history is always:
         #   [assistant(summary), user(pinned_task), ...window starting with assistant...]
         #
-        # This guarantees valid message alternation for all LLM providers:
-        #   assistant → user → assistant → tool → assistant → ...
-        #
+        # This guarantees valid message alternation for all LLM providers.
         # The user's original task message is "pinned" — never expired into the summary.
-        # This follows the same pattern as Claude API compaction and OpenCode.
 
         existing_summary = None
         user_task = None
@@ -84,7 +78,6 @@ class _SlidingWindowBase(StrategyMiddleware):
                 and history[0].get("role") == "assistant"
                 and isinstance(history[0].get("content"), str)
                 and history[0]["content"].startswith(_SUMMARY_MARKER)):
-            # Subsequent sliding: [assistant(summary), user(task), ...actual...]
             existing_summary = history[0]["content"]
             if len(history) > 1 and history[1].get("role") == "user":
                 user_task = history[1]
@@ -92,7 +85,6 @@ class _SlidingWindowBase(StrategyMiddleware):
             else:
                 actual_start = 1
         else:
-            # First sliding: find and pin the user's task message
             for i, msg in enumerate(history):
                 if msg.get("role") == "user":
                     user_task = msg
@@ -104,16 +96,11 @@ class _SlidingWindowBase(StrategyMiddleware):
             actual_history = history[actual_start:]
 
             # Find a safe cut point so window starts with "assistant".
-            # This single rule prevents:
-            #   - Orphaned tool results (tool without preceding assistant+tool_calls)
-            #   - Consecutive assistant messages (assistant summary + assistant window start)
-            #   - Broken tool_call/result pairs (assistant's tool results always follow it)
             cut = len(actual_history) - self.window_size
             while cut > 0 and actual_history[cut].get("role") != "assistant":
                 cut -= 1
 
             if cut <= 0:
-                # No safe cut point found — skip sliding this round
                 return next_call(session)
 
             expired = actual_history[:cut]
@@ -121,20 +108,17 @@ class _SlidingWindowBase(StrategyMiddleware):
 
             new_summary_text = self._generate_summary(expired, session)
 
-            # Merge with existing summary
             if existing_summary:
                 body = existing_summary[len(_SUMMARY_MARKER):].lstrip("\n")
                 merged_body = body + "\n\n" + new_summary_text
             else:
                 merged_body = new_summary_text
 
-            # Enforce max length — keep the most recent part
             if len(merged_body) > self.max_summary_chars:
                 merged_body = "...(earlier history truncated)...\n" + merged_body[-(self.max_summary_chars - 40):]
 
             summary_msg = {"role": "assistant", "content": _SUMMARY_MARKER + "\n" + merged_body}
 
-            # Build: [assistant(summary), user(task), ...window...]
             new_history = [summary_msg]
             if user_task:
                 new_history.append(user_task)
@@ -146,32 +130,27 @@ class _SlidingWindowBase(StrategyMiddleware):
 
         return next_call(session)
 
-    def _compress_tool_results(self, history: List[Dict]):
-        """Compress old tool results that have been consumed by the LLM."""
+    def _clear_old_tool_results(self, history: List[Dict]):
+        """
+        Phase 1: Clear old tool results that have been consumed by the LLM.
+
+        Like OpenCode's pruning: replace content with "[Cleared]" marker.
+        Simple and effective — no preview, no head/tail.
+        """
         for i, msg in enumerate(history):
             if msg.get("role") != "tool":
                 continue
             content = msg.get("content", "")
             if not isinstance(content, str):
                 continue
-            if content.startswith("[Compressed"):
+            if content.startswith(_CLEARED_MARKER):
                 continue
-            if len(content) < self.compress_threshold:
+            if len(content) < self.clear_threshold:
                 continue
             turns_after = sum(1 for m in history[i + 1:] if m.get("role") == "assistant")
-            if turns_after >= self.compress_after_turns:
+            if turns_after >= self.clear_after_turns:
                 tool_name = msg.get("name", "unknown")
-                preview = self._make_preview(content)
-                msg["content"] = f"[Compressed: {tool_name}, {len(content)} chars]\n{preview}"
-
-    def _make_preview(self, content: str) -> str:
-        total = self.preview_head + self.preview_tail
-        if len(content) <= total + 20:
-            return content
-        head = content[:self.preview_head]
-        tail = content[-self.preview_tail:]
-        omitted = len(content) - self.preview_head - self.preview_tail
-        return f"{head}\n...[{omitted} chars omitted]...\n{tail}"
+                msg["content"] = f"{_CLEARED_MARKER} {tool_name} result ({len(content)} chars)"
 
     def _generate_summary(self, expired_messages: List[Dict], session: AgentSession) -> str:
         """Override in subclass."""
@@ -181,8 +160,7 @@ class _SlidingWindowBase(StrategyMiddleware):
 class RuleSlidingWindowMiddleware(_SlidingWindowBase):
     """
     Sliding window with rule-based summary.
-
-    Extracts assistant message content from expired messages to build the summary.
+    Extracts assistant message content from expired messages.
     Zero additional LLM cost.
     """
 
@@ -201,15 +179,49 @@ class RuleSlidingWindowMiddleware(_SlidingWindowBase):
         return "\n".join(lines)
 
 
+# --- Structured summary prompt (inspired by OpenCode's compaction.ts) ---
+
+_SUMMARY_SYSTEM_PROMPT = """\
+You are a conversation summarizer for an AI agent.
+Summarize the expired conversation history so that a continuing agent can pick up seamlessly.
+
+Use this template:
+
+## Goal
+[What is the agent trying to accomplish?]
+
+## Key Decisions & Discoveries
+[Important findings, decisions made, constraints learned — bullet points]
+
+## Accomplished
+[What work has been completed so far — bullet points]
+
+## In Progress / Next Steps
+[What was the agent working on when this history was cut? What remains?]
+
+## Relevant Files
+[List files that were read, created, or modified — paths only, one per line]
+
+Rules:
+- Be factual and dense. No filler.
+- Max 400 words.
+- If tool results were cleared, note what the tool was called for, not the cleared content.
+- Preserve agent names, task IDs, branch names, and other identifiers exactly.\
+"""
+
+
 class LLMSlidingWindowMiddleware(_SlidingWindowBase):
     """
-    Sliding window with LLM-based summary.
+    Sliding window with LLM-based structured summary.
 
-    Uses a (optionally cheaper) model to generate a high-quality summary
+    Uses a (optionally separate) model to generate a high-quality structured summary
     of expired messages. Falls back to rule-based extraction on failure.
+
+    The summary prompt follows OpenCode's compaction template:
+    Goal -> Decisions/Discoveries -> Accomplished -> In Progress -> Relevant Files
     """
 
-    def __init__(self, summary_model: str = None, summary_max_tokens: int = 800, **kwargs):
+    def __init__(self, summary_model: str = None, summary_max_tokens: int = 1200, **kwargs):
         """
         Args:
             summary_model: Model key for summarization (e.g. "qwen/qwen-flash").
@@ -233,29 +245,54 @@ class LLMSlidingWindowMiddleware(_SlidingWindowBase):
             return self._summary_client, self._summary_model_name
         return session.metadata.get("llm_client"), session.metadata.get("llm_model")
 
-    def _generate_summary(self, expired_messages: List[Dict], session: AgentSession) -> str:
-        # Build conversation text
+    def _build_conversation_text(self, expired_messages: List[Dict]) -> str:
+        """Build conversation text for the summarizer, preserving more context."""
         parts = []
         for msg in expired_messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
-            if not content or not isinstance(content, str):
-                continue
+
             if role == "assistant":
-                parts.append(f"[Assistant] {content[:500]}")
+                if msg.get("tool_calls"):
+                    tc_summaries = []
+                    for tc in msg["tool_calls"]:
+                        fn = tc.get("function", {})
+                        name = fn.get("name", "?")
+                        args = fn.get("arguments", "")
+                        if len(args) > 200:
+                            args = args[:200] + "..."
+                        tc_summaries.append(f"{name}({args})")
+                    tc_text = "; ".join(tc_summaries)
+                    if content and isinstance(content, str) and content.strip():
+                        parts.append(f"[Assistant] {content[:800]}\n  -> Tool calls: {tc_text}")
+                    else:
+                        parts.append(f"[Assistant] -> Tool calls: {tc_text}")
+                elif content and isinstance(content, str):
+                    parts.append(f"[Assistant] {content[:800]}")
+
             elif role == "user":
-                parts.append(f"[User] {content[:300]}")
+                if content and isinstance(content, str):
+                    parts.append(f"[User] {content[:500]}")
+
             elif role == "tool":
                 name = msg.get("name", "tool")
-                parts.append(f"[Tool:{name}] {content[:150]}")
+                if content and isinstance(content, str):
+                    if content.startswith(_CLEARED_MARKER):
+                        parts.append(f"[Tool:{name}] {content}")
+                    else:
+                        parts.append(f"[Tool:{name}] {content[:400]}")
 
-        if not parts:
+        return "\n".join(parts)
+
+    def _generate_summary(self, expired_messages: List[Dict], session: AgentSession) -> str:
+        conversation_text = self._build_conversation_text(expired_messages)
+
+        if not conversation_text.strip():
             return "(no messages in expired window)"
 
-        conversation_text = "\n".join(parts)
-        # Cap input to keep the summary call itself cheap
-        if len(conversation_text) > 6000:
-            conversation_text = conversation_text[:3000] + "\n...(truncated)...\n" + conversation_text[-3000:]
+        # Cap input to keep the summary call cheap but informative
+        if len(conversation_text) > 12000:
+            conversation_text = conversation_text[:6000] + "\n...(truncated)...\n" + conversation_text[-6000:]
 
         try:
             client, model = self._get_summary_client(session)
@@ -265,12 +302,7 @@ class LLMSlidingWindowMiddleware(_SlidingWindowBase):
             resp = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": (
-                        "You are a conversation summarizer for an AI agent. "
-                        "Compress the following conversation into a concise summary. "
-                        "Focus on: key decisions made, important findings, current progress, "
-                        "and unresolved issues. Be factual and dense. Use bullet points. Max 300 words."
-                    )},
+                    {"role": "system", "content": _SUMMARY_SYSTEM_PROMPT},
                     {"role": "user", "content": conversation_text}
                 ],
                 stream=False,
@@ -280,7 +312,6 @@ class LLMSlidingWindowMiddleware(_SlidingWindowBase):
 
         except Exception as e:
             Logger.warning(f"[SlidingWindow] LLM summary failed ({e}), falling back to rule-based")
-            # Fallback to rule-based
             lines = []
             for msg in expired_messages:
                 if msg.get("role") == "assistant":
