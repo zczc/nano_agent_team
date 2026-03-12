@@ -39,6 +39,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
         self.is_architect = is_architect
         self._registry = RegistryManager(blackboard_dir)
         self._no_agent_strike_count = 0
+        self._has_verified_plan = skip_user_verification  # persistent: survives history compression
 
     def _is_anyone_else_running(self) -> bool:
         try:
@@ -205,7 +206,7 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
         return self._guard_stream(generator, session)
 
     def _guard_stream(self, generator, session):
-        has_verified_plan = self.skip_user_verification
+        has_verified_plan = self._has_verified_plan  # start from persistent state
         used_tools = set()
 
         for msg in session.history:
@@ -216,6 +217,10 @@ class WatchdogGuardMiddleware(StrategyMiddleware):
             elif msg.get("role") == "user":
                 if msg.get("metadata", {}).get("from_tool_call") == "ask_user":
                     has_verified_plan = True
+
+        # Persist verification state so it survives history compression
+        if has_verified_plan:
+            self._has_verified_plan = True
 
         # Recovery scenario: if other agents already exist in registry,
         # the plan was previously verified — skip re-verification for respawns

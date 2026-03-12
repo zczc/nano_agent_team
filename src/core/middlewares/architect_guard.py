@@ -41,6 +41,7 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
         self.skip_user_verification = skip_user_verification
         self._registry = RegistryManager(blackboard_dir)
         self._no_agent_strike_count = 0
+        self._has_spawned = False  # persistent: once True, stays True across history compressions
 
     # ------------------------------------------------------------------
     # Helpers
@@ -220,7 +221,7 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
 
     def _guard_stream(self, generator, session):
         has_verified_plan = self.skip_user_verification
-        has_spawned = False
+        has_spawned = self._has_spawned  # start from persistent state
 
         for msg in session.history:
             if msg.get("role") == "tool":
@@ -231,6 +232,10 @@ class ArchitectGuardMiddleware(StrategyMiddleware):
             elif msg.get("role") == "user":
                 if msg.get("metadata", {}).get("from_tool_call") == "ask_user":
                     has_verified_plan = True
+
+        # Persist spawn state so it survives history compression
+        if has_spawned:
+            self._has_spawned = True
 
         # Recovery scenario: if other agents already exist in registry,
         # the plan was previously verified — skip re-verification for respawns
