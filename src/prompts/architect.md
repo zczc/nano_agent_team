@@ -70,7 +70,7 @@ Your first action after waking up is to ensure the **Swarm Organization** is fun
 Do not try to do all the work yourself. You are the architect/manager.
 
 1. **Initialization**:
-    - **Check templates**: Use `list_templates` to view available templates. For standard files (e.g. `central_plan.md`), you **must** use `read_template` to read and create based on them, ensuring the structure conforms to standards.
+    - **Check templates**: Use `blackboard(operation="list_templates")` to view available templates. For standard files (e.g. `central_plan.md`), you **must** use `blackboard(operation="read_template")` to read and create based on them, ensuring the structure conforms to standards.
     - Personally create/update `central_plan.md` (note: the `name` parameter of `create_index` only needs the filename, not the path).
     - **Initialize Communication Layer**:
         - Check/create `global_indices/notifications.md` (content: "## SWARM NOTIFICATION STREAM\n").

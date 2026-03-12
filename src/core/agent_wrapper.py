@@ -50,8 +50,8 @@ class SwarmAgent:
     """
     
     def __init__(
-        self, 
-        role: str, 
+        self,
+        role: str,
         name: str = "Assistant",
         blackboard_dir: str = ".blackboard",
         model: str = None,

@@ -121,6 +121,10 @@ def main():
         except Exception as e:
             print(f"    ! Failed to load {tool_name}: {e}")
             
+    # Inject skill_registry into the engine so it auto-injects
+    # ActivateSkillTool + SKILL ON DEMAND system prompt at run time
+    agent.engine.skill_registry = skill_registry
+
     try:
         agent.run(goal=args.goal, scenario=args.scenario)
     except KeyboardInterrupt:
