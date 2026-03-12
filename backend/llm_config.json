@@ -23,8 +23,8 @@
           "id": "qwen3-max"
         },
         {
-          "name": "qwen-plus",
-          "id": "qwen-plus"
+          "name": "qwen3.5-plus",
+          "id": "qwen3-5-plus"
         },
         {
           "name": "qwen-flash",

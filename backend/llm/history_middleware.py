@@ -27,20 +27,92 @@ from backend.utils.logger import Logger
 
 _SUMMARY_MARKER = "[Conversation history summary]"
 _CLEARED_MARKER = "[Cleared]"
+_AGENT_RESULT_MARKER = "[AGENT_RESULT]"
 
-# Tool names whose results are exempt from Phase 1 clearing.
-# Skill SOPs need to stay visible across many turns.
-_CLEAR_EXEMPT_TOOLS = frozenset({"activate_skill"})
+# ── Phase 1: Three-tier clearing configuration ──────────────────────────
+#
+# Tier 0 (exempt):  Never cleared — results needed across many turns or irreplaceable.
+# Tier 1 (delayed): Cleared after clear_after_turns * DELAYED_MULTIPLIER.
+# Tier 2 (normal):  Cleared after clear_after_turns (default 2).
+#
+# Tools returning results < clear_threshold (500 chars) are never cleared regardless of tier.
+# Subagent results are detected by _AGENT_RESULT_MARKER prefix (dynamic tool names).
+
+# Tier 0: Never clear
+_CLEAR_EXEMPT_TOOLS = frozenset({
+    "activate_skill",   # Skill SOP instructions — multi-turn reference
+    "ask_user",         # User input is irreplaceable
+    "browser_use",      # High-cost browser operation; re-run is expensive
+})
+
+# Tier 1: Delayed clear (clear_after_turns * DELAYED_MULTIPLIER)
+_CLEAR_DELAYED_TOOLS = frozenset({
+    "web_search",           # Contains URLs for follow-up web_reader calls
+    "arxiv_search",         # Contains paper references for follow-up
+    "check_swarm_status",   # Status snapshot (plan/timeline details beyond system prompt)
+})
+
+DELAYED_MULTIPLIER = 3  # Tier 1 tools cleared after clear_after_turns * 3
+
+
+# Blackboard operation → tier mapping (looked up via tool_call_id)
+_BB_EXEMPT_OPS = frozenset({
+    "update_task", "append_to_index", "update_index", "create_index", "read_template",
+})
+_BB_DELAYED_OPS = frozenset({
+    "list_indices", "read_index", "list_templates",
+})
+
+
+def _find_blackboard_operation(history: List[Dict], tool_msg_index: int) -> str:
+    """Find the 'operation' argument for a blackboard tool result.
+
+    Walks backwards from tool_msg_index to find the assistant message whose
+    tool_calls contain the matching tool_call_id, then extracts the operation
+    from the parsed arguments.
+    """
+    import json as _json
+
+    tool_call_id = history[tool_msg_index].get("tool_call_id")
+    if not tool_call_id:
+        return "unknown"
+
+    for j in range(tool_msg_index - 1, -1, -1):
+        msg = history[j]
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls", []):
+            if tc.get("id") == tool_call_id:
+                try:
+                    args = _json.loads(tc["function"]["arguments"])
+                    return args.get("operation", "unknown")
+                except (ValueError, KeyError, TypeError):
+                    return "unknown"
+    return "unknown"
+
+
+def _classify_blackboard_tier(history: List[Dict], tool_msg_index: int) -> str:
+    """Return 'exempt', 'delayed', or 'normal' for a blackboard tool result."""
+    op = _find_blackboard_operation(history, tool_msg_index)
+    if op in _BB_EXEMPT_OPS:
+        return "exempt"
+    if op in _BB_DELAYED_OPS:
+        return "delayed"
+    return "normal"
 
 
 class _SlidingWindowBase(StrategyMiddleware):
     """
     Base class for sliding window history management (batch compaction strategy).
 
-    Phase 1 — Tool result pruning (every call, zero cost):
-        After the LLM has consumed a tool result (N subsequent assistant turns),
-        replace the content with a short "[Cleared]" marker.
-        activate_skill results are exempt (skill SOPs need multi-turn visibility).
+    Phase 1 — Three-tier tool result pruning (every call, zero cost):
+        Tier 0 (exempt):  Never cleared — activate_skill, ask_user, browser_use,
+                          subagent results ([AGENT_RESULT] marker),
+                          blackboard write ops & read_template.
+        Tier 1 (delayed): Cleared after clear_after_turns * 3 — web_search,
+                          arxiv_search, check_swarm_status,
+                          blackboard list ops & read_index.
+        Tier 2 (normal):  Cleared after clear_after_turns — all others.
 
     Phase 2 — Batch compaction (only when threshold reached):
         When message count or estimated token usage exceeds the threshold,
@@ -96,10 +168,15 @@ class _SlidingWindowBase(StrategyMiddleware):
 
     def _clear_old_tool_results(self, history: List[Dict]):
         """
-        Phase 1: Clear old tool results that have been consumed by the LLM.
+        Phase 1: Three-tier clearing of old tool results.
 
-        Like OpenCode's pruning: replace content with "[Cleared]" marker.
-        activate_skill results are exempt — skill SOPs need to stay visible.
+        Tier 0 (exempt):  Never cleared — activate_skill, ask_user, browser_use,
+                          subagent results ([AGENT_RESULT] marker),
+                          blackboard write ops & read_template.
+        Tier 1 (delayed): Cleared after clear_after_turns * DELAYED_MULTIPLIER —
+                          web_search, arxiv_search, check_swarm_status,
+                          blackboard list ops & read_index.
+        Tier 2 (normal):  Cleared after clear_after_turns — all others.
         """
         for i, msg in enumerate(history):
             if msg.get("role") != "tool":
@@ -111,11 +188,36 @@ class _SlidingWindowBase(StrategyMiddleware):
                 continue
             if len(content) < self.clear_threshold:
                 continue
+
             tool_name = msg.get("name", "unknown")
+
+            # ── Tier 0: Exempt by tool name ──
             if tool_name in _CLEAR_EXEMPT_TOOLS:
                 continue
-            turns_after = sum(1 for m in history[i + 1:] if m.get("role") == "assistant")
-            if turns_after >= self.clear_after_turns:
+
+            # ── Tier 0: Exempt subagent results by content marker ──
+            if content.startswith(_AGENT_RESULT_MARKER):
+                continue
+
+            # ── Blackboard: classify by operation (via tool_call_id lookup) ──
+            if tool_name == "blackboard":
+                bb_tier = _classify_blackboard_tier(history, i)
+                if bb_tier == "exempt":
+                    continue
+                elif bb_tier == "delayed":
+                    required_turns = self.clear_after_turns * DELAYED_MULTIPLIER
+                else:
+                    required_turns = self.clear_after_turns
+            elif tool_name in _CLEAR_DELAYED_TOOLS:
+                required_turns = self.clear_after_turns * DELAYED_MULTIPLIER
+            else:
+                required_turns = self.clear_after_turns
+
+            # ── Apply clearing ──
+            turns_after = sum(
+                1 for m in history[i + 1:] if m.get("role") == "assistant"
+            )
+            if turns_after >= required_turns:
                 msg["content"] = f"{_CLEARED_MARKER} {tool_name} result ({len(content)} chars)"
 
     # ── Phase 2 ──────────────────────────────────────────────────────────
@@ -276,7 +378,9 @@ Rules:
 - If tool results were cleared, note what the tool was called for, not the cleared content.
 - Preserve agent names, task IDs, branch names, and other identifiers exactly.
 - If any skill was activated (via activate_skill), note the skill name and the agent's \
-current phase/step within that skill's workflow.\
+current phase/step within that skill's workflow.
+- If subagent results are present ([AGENT_RESULT] marker), preserve the key conclusions.
+- For blackboard operations, note task status changes, checksums, and plan structure.\
 """
 
 
@@ -318,7 +422,7 @@ class LLMSlidingWindowMiddleware(_SlidingWindowBase):
     def _build_conversation_text(self, expired_messages: List[Dict]) -> str:
         """Build conversation text for the summarizer."""
         parts = []
-        for msg in expired_messages:
+        for i, msg in enumerate(expired_messages):
             role = msg.get("role", "")
             content = msg.get("content", "")
 
@@ -349,9 +453,17 @@ class LLMSlidingWindowMiddleware(_SlidingWindowBase):
                 if content and isinstance(content, str):
                     if content.startswith(_CLEARED_MARKER):
                         parts.append(f"[Tool:{name}] {content}")
-                    elif name in _CLEAR_EXEMPT_TOOLS:
-                        # Skill SOPs: give summarizer more context
+                    elif name in _CLEAR_EXEMPT_TOOLS or content.startswith(_AGENT_RESULT_MARKER):
+                        # Exempt tools & subagent results: generous context
                         parts.append(f"[Tool:{name}] {content[:2000]}")
+                    elif name == "blackboard":
+                        # Blackboard: exempt ops get 2000, delayed ops get 800
+                        bb_tier = _classify_blackboard_tier(expired_messages, i)
+                        limit = 2000 if bb_tier == "exempt" else 800
+                        parts.append(f"[Tool:{name}] {content[:limit]}")
+                    elif name in _CLEAR_DELAYED_TOOLS:
+                        # Delayed tools: moderate context
+                        parts.append(f"[Tool:{name}] {content[:800]}")
                     else:
                         parts.append(f"[Tool:{name}] {content[:300]}")
 

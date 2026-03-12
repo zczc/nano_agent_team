@@ -226,13 +226,18 @@ class AgentTool(BaseTool):
                 if event.type == "finish":
                     final_history = event.data["history"]
             
+            # Prefix successful results with marker so history middleware
+            # can identify subagent outputs (dynamic tool names) and exempt
+            # them from Phase 1 clearing.
+            _MARKER = "[AGENT_RESULT]"
+
             if final_history:
                 last_msg = final_history[-1]
                 if last_msg["role"] == "assistant":
-                    return str(last_msg["content"])
-                elif last_msg["role"] == "tool": # 可能是最后一步是工具结果
-                    return str(last_msg["content"])
-            
+                    return f"{_MARKER}\n{str(last_msg['content'])}"
+                elif last_msg["role"] == "tool":
+                    return f"{_MARKER}\n{str(last_msg['content'])}"
+
             return "Task completed (no output)."
             
         except Exception as e:
