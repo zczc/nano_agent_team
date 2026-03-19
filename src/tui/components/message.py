@@ -51,7 +51,7 @@ class UserMessageWidget(Static):
     
     def compose(self) -> ComposeResult:
         yield Static(f"[bold cyan]You[/bold cyan]", markup=True)
-        yield Static(self.message.content)
+        yield Static(self.message.content, markup=False)
 
 
 class AssistantMessageWidget(Static):
@@ -93,7 +93,7 @@ class AssistantMessageWidget(Static):
         if self._use_markdown:
             yield Markdown(self.message.content, id="content-md")
         else:
-            yield Static(self.message.content, id="content-static")
+            yield Static(self.message.content, id="content-static", markup=False)
     
     def update_content(self, content: str):
         """Update the message content (for streaming - uses Static)"""
@@ -265,4 +265,4 @@ def create_message_widget(message: ChatMessage) -> Widget:
     elif message.role == "thinking":
         return ThinkingWidget(message.content)
     else:
-        return Static(f"[{message.role}] {escape(message.content)}")
+        return Static(f"[{message.role}] {message.content}", markup=False)
