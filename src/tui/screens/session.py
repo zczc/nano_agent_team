@@ -424,6 +424,17 @@ Be concise and helpful. Format your responses using markdown when appropriate.""
                 except Exception:
                     pass
     
+    def _trim_chat_area(self, chat_area: ScrollableContainer):
+        """Remove excess widgets from chat area in one batch"""
+        children = chat_area.children
+        overflow = len(children) - MAX_VISIBLE_MESSAGES
+        if overflow > 0:
+            # Reset tracker if the current assistant widget is being removed
+            if self.current_assistant_widget in children[:overflow]:
+                self.current_assistant_widget = None
+            for child in list(children[:overflow]):
+                child.remove()
+
     def _add_or_update_message(self, chat_msg: ChatMessage):
         """Add or update a message in the chat area"""
         # Check for error notification
@@ -432,18 +443,13 @@ Be concise and helpful. Format your responses using markdown when appropriate.""
             chat_msg._notified = True
 
         chat_area = self.query_one("#chat-area", ScrollableContainer)
-        
+
         if chat_msg.is_error or chat_msg.role == "error":
             widget = create_message_widget(chat_msg)
             chat_area.mount(widget)
             chat_area.scroll_end(animate=False)
-            
-            children = chat_area.children
-            if len(children) > MAX_VISIBLE_MESSAGES:
-                children[0].remove()
-            
             self.current_assistant_widget = None
-            
+
         elif chat_msg.role == "assistant" and chat_msg.is_streaming:
             # Streaming assistant message
             if self.current_assistant_widget is None:
@@ -455,30 +461,28 @@ Be concise and helpful. Format your responses using markdown when appropriate.""
                 # Update existing widget
                 if isinstance(self.current_assistant_widget, AssistantMessageWidget):
                     self.current_assistant_widget.update_content(chat_msg.content)
-            
+
             # Scroll to bottom
             chat_area.scroll_end(animate=False)
-            
+
         elif chat_msg.role == "assistant" and not chat_msg.is_streaming:
             # Finished streaming
             if self.current_assistant_widget and isinstance(self.current_assistant_widget, AssistantMessageWidget):
                 self.current_assistant_widget.finish_streaming()
             self.current_assistant_widget = None
-            
+
         else:
             # Other message types (user, tool, etc.)
             widget = create_message_widget(chat_msg)
             chat_area.mount(widget)
             chat_area.scroll_end(animate=False)
-            
-            # Cap visible messages to prevent unbounded memory growth
-            children = chat_area.children
-            if len(children) > MAX_VISIBLE_MESSAGES:
-                children[0].remove()
-            
+
             # If it's a user message, reset assistant widget tracker
             if chat_msg.role == "user":
                 self.current_assistant_widget = None
+
+        # Unified cap: trim after every mount, all branches
+        self._trim_chat_area(chat_area)
     
     def action_toggle_mode(self):
         """Toggle between Chat and Swarm mode"""
