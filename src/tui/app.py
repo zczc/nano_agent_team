@@ -155,8 +155,8 @@ class HomeScreen(Screen):
         """Get right status text (current model)"""
         model = state.current_model
         if model:
-            return f"[{model.provider_id}] {model.name or model.model_id}"
-        return "[No model selected]"
+            return f"({model.provider_id}) {model.name or model.model_id}"
+        return "(No model selected)"
     
     def on_mount(self):
         """Focus input on mount"""

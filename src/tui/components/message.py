@@ -9,7 +9,6 @@ from textual.app import ComposeResult
 from dataclasses import dataclass
 from typing import Optional
 import time
-from rich.markup import escape
 
 
 @dataclass
@@ -174,14 +173,12 @@ class ToolMessageWidget(Static):
     
     def compose(self) -> ComposeResult:
         icon = "⚙" if self.message.role == "tool_call" else "→"
-        tool_name = escape(self.message.tool_name or "tool")
+        tool_name = self.message.tool_name or "tool"
         content = self.message.content
         if len(content) > 100:
             content = content[:100] + "..."
-        content = escape(content)
-        
-        yield Static(f"[bold magenta]{icon} {tool_name}[/bold magenta]  [dim]{content}[/dim]",
-                     markup=True)
+
+        yield Static(f"{icon} {tool_name}  {content}", markup=False)
 
 
 class ThinkingWidget(Static):
@@ -197,13 +194,13 @@ class ThinkingWidget(Static):
     """
     
     def __init__(self, content: str = "Thinking..."):
-        super().__init__(f"[italic dim]💭 {escape(content)}[/italic dim]", markup=True)
+        super().__init__(f"💭 {content}", markup=False)
         self.thinking_content = content
-    
+
     def update_thinking(self, content: str):
         """Update thinking content"""
         self.thinking_content = content
-        self.update(f"[italic dim]💭 {escape(content)}[/italic dim]")
+        self.update(f"💭 {content}")
 
 
 class FinishMessageWidget(Static):

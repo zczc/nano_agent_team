@@ -12,8 +12,6 @@ from textual import on, work
 from typing import Optional
 import threading
 import traceback
-from rich.markup import escape
-
 from backend.utils.logger import Logger
 from ..state import state, AgentMode
 from ..constants import EXIT_KEYWORDS, get_mode_display
@@ -184,7 +182,8 @@ class SessionScreen(Screen):
         """Get model name for display"""
         model = state.current_model
         if model:
-            return f"[cyan]{escape(model.name or model.model_id)}[/cyan]"
+            name = (model.name or model.model_id).replace("[", "\\[")
+            return f"[cyan]{name}[/cyan]"
         return "[dim]No model[/dim]"
     
     def _get_mode_display(self) -> str:
